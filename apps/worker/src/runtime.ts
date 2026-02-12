@@ -400,7 +400,7 @@ export class WorkerRuntime {
           ]
             .filter(Boolean)
             .join("\n");
-          await this.slack.postMessage(task.responseChannel, reply, { threadTs: task.responseThreadTs });
+          await this.slack.postMessage(task.responseChannel, reply);
         }
         missionSucceeded = true;
         } finally {
@@ -566,7 +566,7 @@ export class WorkerRuntime {
       if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
         const text = `Run ${task.runId}: failed\n${String(error)}`;
         try {
-          await this.slack.postMessage(task.responseChannel, text, { threadTs: task.responseThreadTs });
+          await this.slack.postMessage(task.responseChannel, text);
         } catch (postError) {
           console.error("[worker] failed to post Slack error reply:", postError);
         }

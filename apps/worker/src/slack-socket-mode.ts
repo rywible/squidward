@@ -8,6 +8,9 @@ interface SlackSocketModeListenerDeps {
   primaryRepoPath: string;
   queue: SerializedTaskProcessor<WorkerTaskPayload>;
   db: Database;
+  selfUserId?: string;
+  allowAllChannelMessages?: boolean;
+  allowedUserIds?: string[];
   onTaskQueued?: () => void | Promise<void>;
   now?: () => Date;
 }
@@ -15,15 +18,22 @@ interface SlackSocketModeListenerDeps {
 interface SlackEnvelope {
   type?: string;
   envelope_id?: string;
+  authorizations?: Array<{
+    user_id?: string;
+    is_bot?: boolean;
+  }>;
   payload?: {
-    event?: {
-      type?: string;
-      subtype?: string;
-      text?: string;
-      channel?: string;
-      ts?: string;
-      thread_ts?: string;
-    };
+      event?: {
+        type?: string;
+        subtype?: string;
+        bot_id?: string;
+        user?: string;
+        username?: string;
+        text?: string;
+        channel?: string;
+        ts?: string;
+        thread_ts?: string;
+      };
   };
 }
 
@@ -41,7 +51,83 @@ const parseRetrievalFeedbackCommand = (
   };
 };
 
-const normalizeSlackText = (text: string): string => text.replace(/<@[A-Z0-9]+>/g, "").trim();
+const normalizeSlackText = (text: string): string =>
+  text
+    .replace(/<@[A-Z0-9]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+const isSlackSelfEvent = (event: {
+  bot_id?: string;
+  user?: string;
+  username?: string;
+  subtype?: string;
+  type?: string;
+  selfUserId?: string;
+  authorizedBotUsers?: string[];
+}): boolean => {
+  if (event.bot_id) {
+    return true;
+  }
+
+  if (event.subtype) {
+    return true;
+  }
+
+  const botUserId = event.selfUserId?.trim() ?? process.env.SLACK_BOT_USER_ID?.trim();
+  if (botUserId && (event.user === botUserId || event.username === botUserId)) {
+    return true;
+  }
+  if (event.authorizedBotUsers) {
+    const hasAuthorizedBot = event.authorizedBotUsers.some((candidate) => candidate && candidate === event.user);
+    if (hasAuthorizedBot) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const isDirectMessageChannel = (channel: string): boolean => channel.startsWith("D") || channel.startsWith("G");
+
+const parseSlackAllowedUsers = (value?: string): string[] => {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+};
+
+const isAllowedSlackUser = (userId: string | undefined, allowedUserIds: string[]): boolean => {
+  if (allowedUserIds.length === 0) return true;
+  return typeof userId === "string" && allowedUserIds.includes(userId);
+};
+
+const isSelfMention = (text: string, selfUserId?: string): boolean => {
+  if (!selfUserId) return false;
+  return text.includes(`<@${selfUserId}>`);
+};
+
+const shouldHandleSlackMessage = (
+  eventType: string,
+  channel: string,
+  normalizedText: string,
+  userId: string | undefined,
+  allowedUserIds: string[],
+  allowAllChannelMessages: boolean,
+  selfUserId?: string
+): boolean => {
+  if (!isAllowedSlackUser(userId, allowedUserIds)) {
+    return false;
+  }
+
+  if (eventType === "app_mention") {
+    return true;
+  }
+
+  if (eventType !== "message") return false;
+  if (isDirectMessageChannel(channel)) return true;
+  if (allowAllChannelMessages) return true;
+  return isSelfMention(normalizedText, selfUserId);
+};
 
 export class SlackSocketModeListener {
   private readonly deps: SlackSocketModeListenerDeps;
@@ -144,11 +230,30 @@ export class SlackSocketModeListener {
     const subtype = event.subtype ?? "";
     const channel = event.channel ?? "";
     const text = event.text ?? "";
-    if (!channel || !text.trim()) return;
-    if (eventType === "message" && subtype === "bot_message") return;
-    if (eventType !== "message" && eventType !== "app_mention") return;
-
+    const user = event.user;
     const normalizedText = normalizeSlackText(text) || text.trim();
+    if (!channel || !text.trim()) return;
+    const allowedUserIds = this.deps.allowedUserIds ?? [];
+    const authorizedBotUsers =
+      envelope.authorizations
+        ?.filter((authorization) => authorization?.is_bot === true)
+        .map((authorization) => authorization.user_id)
+        .filter((value): value is string => typeof value === "string" && value.length > 0) ?? [];
+    if (
+      isSlackSelfEvent({
+        ...event,
+        selfUserId: this.deps.selfUserId,
+        authorizedBotUsers,
+      })
+    ) {
+      return;
+    }
+    if (eventType === "message" && subtype === "bot_message") return;
+
+    if (!isAllowedSlackUser(user, allowedUserIds)) {
+      return;
+    }
+
     const feedback = parseRetrievalFeedbackCommand(normalizedText);
     if (feedback) {
       const now = this.now().toISOString();
@@ -167,8 +272,21 @@ export class SlackSocketModeListener {
       return;
     }
 
+    if (
+      !shouldHandleSlackMessage(
+        eventType,
+        channel,
+        normalizedText,
+        user,
+        allowedUserIds,
+        this.deps.allowAllChannelMessages ?? false,
+        this.deps.selfUserId
+      )
+    ) {
+      return;
+    }
+
     const runId = `run_slack_${Date.now()}`;
-    const responseThreadTs = event.thread_ts ?? event.ts;
     const enqueueResult = await this.deps.queue.enqueue({
       dedupeKey: `slack:${channel}:${event.ts ?? Date.now()}`,
       priority: "P0",
@@ -180,7 +298,6 @@ export class SlackSocketModeListener {
         title: "Slack codex mission",
         requestText: normalizedText,
         responseChannel: channel,
-        responseThreadTs,
         repoPath: this.deps.primaryRepoPath,
         cwd: this.deps.primaryRepoPath,
       },
@@ -194,3 +311,13 @@ export class SlackSocketModeListener {
     }
   }
 }
+
+export const __testOnly = {
+  isSlackSelfEvent,
+  shouldHandleSlackMessage,
+  isDirectMessageChannel,
+  isSelfMention,
+  parseSlackAllowedUsers,
+  isAllowedSlackUser,
+  normalizeSlackText,
+};

@@ -21,6 +21,9 @@ const KEY_ORDER = [
   "API_HOST",
   "API_PORT",
   "SLACK_BOT_TOKEN",
+  "SLACK_BOT_USER_ID",
+  "SLACK_ALLOW_ALL_CHANNEL_MESSAGES",
+  "SLACK_TRIGGER_USER_IDS",
   "SLACK_APP_TOKEN",
   "SLACK_SOCKET_MODE_ENABLED",
   "SLACK_SIGNING_SECRET",
@@ -213,11 +216,29 @@ const main = async (): Promise<void> => {
       env.SLACK_APP_TOKEN,
       ""
     );
+    env.SLACK_BOT_USER_ID = await prompt(
+      rl,
+      "Slack bot user ID (optional, improves bot-message filtering)",
+      env.SLACK_BOT_USER_ID,
+      ""
+    );
     env.SLACK_SOCKET_MODE_ENABLED = await prompt(
       rl,
       "Enable Slack Socket Mode (1=yes, 0=no)",
       env.SLACK_SOCKET_MODE_ENABLED,
       "1"
+    );
+    env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES = await prompt(
+      rl,
+      "Listen to all channel messages (1=yes, 0=mention-only)",
+      env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES,
+      "0"
+    );
+    env.SLACK_TRIGGER_USER_IDS = await prompt(
+      rl,
+      "Slack trigger user IDs (comma-separated, optional; default all users when empty)",
+      env.SLACK_TRIGGER_USER_IDS,
+      ""
     );
     env.SLACK_SIGNING_SECRET = await prompt(rl, "Slack signing secret", env.SLACK_SIGNING_SECRET, "");
 

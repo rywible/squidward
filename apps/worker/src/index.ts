@@ -35,6 +35,14 @@ const resolveDbPath = (rawPath?: string): string => {
 const dbPath = resolveDbPath(process.env.AGENT_DB_PATH);
 const useStubExecutor = process.env.WORKER_USE_STUB_EXECUTOR === "1";
 
+const parseSlackAllowedUsers = (value?: string): string[] => {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+};
+
 const db = new SqliteWorkerDb({ dbPath });
 const queue = new SerializedTaskProcessor<WorkerTaskPayload>(db, { coalesceWindowMs: 15 * 60_000 });
 const sessions = new CodexSessionManager(Number(process.env.MAX_CODEX_SESSIONS ?? 4));
@@ -122,17 +130,7 @@ const runtime = new WorkerRuntime({
 });
 
 const socketModeEnabled = process.env.SLACK_SOCKET_MODE_ENABLED === "1";
-const slackSocketListener =
-  socketModeEnabled && process.env.SLACK_APP_TOKEN
-    ? new SlackSocketModeListener({
-        appToken: process.env.SLACK_APP_TOKEN,
-        primaryRepoPath:
-          process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
-        queue,
-        db: db.db,
-        onTaskQueued: () => runtime.poke(),
-      })
-    : null;
+let slackSocketListener: SlackSocketModeListener | null = null;
 
 const writePreflightAudit = async (
   runId: string,
@@ -189,6 +187,29 @@ const runStartupPreflight = async (): Promise<void> => {
   }
 };
 
+const resolveSlackSelfUserId = async (): Promise<string | undefined> => {
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  if (!botToken) {
+    return process.env.SLACK_BOT_USER_ID?.trim();
+  }
+  try {
+    const response = await fetch("https://slack.com/api/auth.test", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    });
+    const payload = (await response.json()) as { ok?: boolean; user_id?: string; user?: string; error?: string };
+    if (response.ok && payload.ok && payload.user_id) {
+      return payload.user_id;
+    }
+  } catch {
+    // best effort only
+  }
+  return process.env.SLACK_BOT_USER_ID?.trim();
+};
+
 const bootstrapCommand = process.env.WORKER_BOOTSTRAP_COMMAND ?? "codex --help || true";
 
 await runStartupPreflight();
@@ -207,8 +228,30 @@ await queue.enqueue({
 await runtime.start();
 if (socketModeEnabled) {
   if (!slackSocketListener) {
-    console.warn("[worker] SLACK_SOCKET_MODE_ENABLED=1 but SLACK_APP_TOKEN is missing; socket mode disabled");
-  } else {
+    const selfUserId = await resolveSlackSelfUserId();
+    if (!selfUserId && !process.env.SLACK_BOT_USER_ID && !process.env.SLACK_BOT_TOKEN) {
+      console.warn(
+        "[worker] Slack self user id unknown; only app_mention/DM events will be auto-triggered by default in socket mode"
+      );
+    }
+    if (process.env.SLACK_APP_TOKEN) {
+      slackSocketListener = new SlackSocketModeListener({
+        appToken: process.env.SLACK_APP_TOKEN,
+        primaryRepoPath:
+          process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
+        queue,
+        db: db.db,
+        selfUserId,
+        allowedUserIds: parseSlackAllowedUsers(process.env.SLACK_TRIGGER_USER_IDS),
+        allowAllChannelMessages: process.env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES === "1",
+        onTaskQueued: () => runtime.poke(),
+      });
+    } else {
+      console.warn("[worker] SLACK_SOCKET_MODE_ENABLED=1 but SLACK_APP_TOKEN is missing; socket mode disabled");
+    }
+  }
+
+  if (slackSocketListener) {
     await slackSocketListener.start();
     console.log("[worker] Slack Socket Mode listener started");
   }

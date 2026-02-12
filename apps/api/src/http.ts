@@ -122,6 +122,72 @@ const parseRetrievalFeedbackCommand = (
   };
 };
 
+const normalizeSlackText = (text: string): string =>
+  text
+    .replace(/<@[A-Z0-9]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const isDirectMessageChannel = (channel: string): boolean => channel.startsWith("D") || channel.startsWith("G");
+
+const parseSlackAllowedUsers = (value?: string): string[] => {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+};
+
+const isAllowedSlackUser = (userId: string | undefined, allowedUserIds: string[]): boolean => {
+  if (allowedUserIds.length === 0) return true;
+  return typeof userId === "string" && allowedUserIds.includes(userId);
+};
+
+const isSelfMention = (text: string, selfUserId?: string): boolean => {
+  if (!selfUserId) return false;
+  return text.includes(`<@${selfUserId}>`);
+};
+
+const isSelfSlackEvent = (
+  event: Record<string, unknown>,
+  authorizedBotUsers: string[],
+  selfUserId?: string
+): boolean => {
+  const botId = typeof event.bot_id === "string" ? event.bot_id : undefined;
+  if (botId) return true;
+
+  const subtype = typeof event.subtype === "string" ? event.subtype : "";
+  if (subtype) return true;
+
+  const user = typeof event.user === "string" ? event.user : undefined;
+  if (selfUserId && user === selfUserId) return true;
+  if (user && authorizedBotUsers.includes(user)) return true;
+  const username = typeof event.username === "string" ? event.username : undefined;
+  if (selfUserId && username === selfUserId) return true;
+
+  return false;
+};
+
+const shouldHandleSlackEvent = (event: {
+  type: string;
+  channel: string;
+  text: string;
+  user?: string;
+  allowedUserIds: string[];
+  allowAllChannelMessages: boolean;
+  selfUserId?: string;
+}): boolean => {
+  if (!isAllowedSlackUser(event.user, event.allowedUserIds)) {
+    return false;
+  }
+
+  if (event.type === "app_mention") return true;
+  if (event.type !== "message") return false;
+  if (isDirectMessageChannel(event.channel)) return true;
+  if (event.allowAllChannelMessages) return true;
+  return isSelfMention(event.text, event.selfUserId);
+};
+
 const parseLimitParam = (
   url: URL,
   key: string,
@@ -204,13 +270,27 @@ export const createHandler = (options?: HandlerOptions) => {
     const subtype = event?.subtype ? String(event.subtype) : "";
     const channel = event?.channel ? String(event.channel) : "";
     const text = event?.text ? String(event.text) : "";
+    const user = event?.user ? String(event.user) : undefined;
     const eventTs = event?.ts ? String(event.ts) : undefined;
-    const isActionableMessage = eventType === "message" && subtype !== "bot_message";
-    const isActionableMention = eventType === "app_mention";
-    if ((isActionableMessage || isActionableMention) && channel && text.trim().length > 0) {
-      const normalizedText = text.replace(/<@[A-Z0-9]+>/g, "").trim() || text.trim();
+    const normalizedText = normalizeSlackText(text) || text.trim();
+    const selfUserId = env.SLACK_BOT_USER_ID?.trim();
+    const allowAllChannelMessages = env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES === "1";
+    const allowedUserIds = parseSlackAllowedUsers(env.SLACK_TRIGGER_USER_IDS);
+    const authorizedBotUsers = Array.isArray((payload as { authorizations?: unknown }).authorizations)
+      ? ((payload as { authorizations?: Array<{ user_id?: unknown; is_bot?: unknown }> }).authorizations
+          ?.map((authorization) =>
+            authorization?.is_bot === true && typeof authorization.user_id === "string" ? authorization.user_id : undefined
+          )
+          .filter((value): value is string => typeof value === "string" && value.length > 0) ?? [])
+      : [];
+
+    if (event && channel && text.trim().length > 0) {
       const db = new Database(dbPath, { create: true, strict: false });
       const now = new Date().toISOString();
+      if (!isAllowedSlackUser(user, allowedUserIds)) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
       const retrievalFeedback = parseRetrievalFeedbackCommand(normalizedText);
       if (retrievalFeedback) {
         const queryExists = db
@@ -251,6 +331,22 @@ export const createHandler = (options?: HandlerOptions) => {
           202
         );
       }
+      if (
+        isSelfSlackEvent(event, authorizedBotUsers, selfUserId) ||
+        !shouldHandleSlackEvent({
+          type: eventType,
+          channel,
+          text: normalizedText,
+          user,
+          allowedUserIds,
+          allowAllChannelMessages,
+          selfUserId,
+        })
+      ) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
+
       const runId = `run_slack_${Date.now()}`;
       const dedupeKey = `slack:${channel}:${eventTs ?? Date.now()}`;
       db.query(
@@ -270,7 +366,6 @@ export const createHandler = (options?: HandlerOptions) => {
             title: "Slack codex mission",
             requestText: normalizedText,
             responseChannel: channel,
-            responseThreadTs: eventTs,
             repoPath: env.PRIMARY_REPO_PATH ?? "",
             cwd: env.PRIMARY_REPO_PATH ?? process.cwd(),
           },
