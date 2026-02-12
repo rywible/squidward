@@ -169,7 +169,17 @@ export class WorkerRuntime {
       await this.queue.processNext(async (task) => {
         const session = this.sessions.start(task.id);
         try {
-          await this.executeTask(task.payload);
+          const payload =
+            task.payload && typeof task.payload === "object"
+              ? (task.payload as WorkerTaskPayload)
+              : ({
+                  taskType: "maintenance",
+                  runId: task.id,
+                  command: "true",
+                  cwd: this.config.primaryRepoPath,
+                  title: "Recovered malformed queue payload",
+                } as WorkerTaskPayload);
+          await this.executeTask(payload);
         } finally {
           this.sessions.end(session.id);
         }
@@ -202,6 +212,15 @@ export class WorkerRuntime {
   }
 
   private async executeTask(task: WorkerTaskPayload): Promise<void> {
+    if (!task || typeof task !== "object") {
+      task = {
+        taskType: "maintenance",
+        runId: crypto.randomUUID(),
+        command: "true",
+        cwd: this.config.primaryRepoPath,
+        title: "Recovered invalid task payload",
+      };
+    }
     const taskType = task.taskType ?? "maintenance";
     if (taskType === "maintenance") {
       await this.audit.runWithAudit(task.runId, task.command ?? "true", task.cwd ?? process.cwd());

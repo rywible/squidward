@@ -40,6 +40,63 @@ const normalizeStatus = (status: string): QueueItemStatus => {
   return "queued";
 };
 
+const parseQueueEnvelope = (rawPayloadJson: string, sourceId: string, rowId: string): {
+  dedupeKey: string;
+  payload: unknown;
+  coalescedCount: number;
+} => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawPayloadJson);
+  } catch {
+    parsed = {};
+  }
+
+  if (typeof parsed === "object" && parsed !== null && "payload" in parsed) {
+    const envelope = parsed as {
+      dedupeKey?: unknown;
+      payload?: unknown;
+      coalescedCount?: unknown;
+    };
+    const payload = envelope.payload ?? {};
+    const payloadObject =
+      payload && typeof payload === "object"
+        ? payload
+        : {
+            taskType: "maintenance",
+            command: "true",
+          };
+    const withRunId = {
+      ...(payloadObject as Record<string, unknown>),
+      runId: (payloadObject as { runId?: string }).runId ?? sourceId ?? rowId,
+    };
+    return {
+      dedupeKey:
+        typeof envelope.dedupeKey === "string" && envelope.dedupeKey.length > 0
+          ? envelope.dedupeKey
+          : `legacy:${rowId}`,
+      payload: withRunId,
+      coalescedCount: Number(envelope.coalescedCount ?? 0),
+    };
+  }
+
+  const legacyPayloadObject =
+    parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : ({
+          taskType: "maintenance",
+          command: "true",
+        } as Record<string, unknown>);
+  return {
+    dedupeKey: `legacy:${rowId}`,
+    payload: {
+      ...legacyPayloadObject,
+      runId: (legacyPayloadObject as { runId?: string }).runId ?? sourceId ?? rowId,
+    },
+    coalescedCount: 0,
+  };
+};
+
 const migrate = (db: Database): void => {
   const migrationPath = resolve(import.meta.dir, "../../../packages/db/migrations/001_initial.sql");
   db.exec(readFileSync(migrationPath, "utf8"));
@@ -132,14 +189,11 @@ export class SqliteWorkerDb implements WorkerDb {
       return null;
     }
 
-    const payload = JSON.parse(String(row.payload_json)) as {
-      payload: unknown;
-      coalescedCount?: number;
-    };
+    const payload = parseQueueEnvelope(String(row.payload_json), String(row.source_id ?? row.id), String(row.id));
 
     return {
       id: String(row.id),
-      dedupeKey,
+      dedupeKey: payload.dedupeKey || dedupeKey,
       priority: toPriority(Number(row.priority)),
       payload: payload.payload,
       status: normalizeStatus(String(row.status)),
@@ -147,7 +201,7 @@ export class SqliteWorkerDb implements WorkerDb {
       updatedAt: new Date(String(row.updated_at)),
       availableAt: new Date(String(row.scheduled_for)),
       attempts: Number(row.attempts ?? 0),
-      coalescedCount: Number(payload.coalescedCount ?? 0),
+      coalescedCount: payload.coalescedCount,
     };
   }
 
@@ -164,15 +218,11 @@ export class SqliteWorkerDb implements WorkerDb {
       .all(now.toISOString(), limit) as SqlRecord[];
 
     return rows.map((row) => {
-      const payload = JSON.parse(String(row.payload_json)) as {
-        dedupeKey: string;
-        payload: unknown;
-        coalescedCount?: number;
-      };
+      const payload = parseQueueEnvelope(String(row.payload_json), String(row.source_id ?? row.id), String(row.id));
 
       return {
         id: String(row.id),
-        dedupeKey: String(payload.dedupeKey),
+        dedupeKey: payload.dedupeKey,
         priority: toPriority(Number(row.priority)),
         payload: payload.payload,
         status: "queued",
@@ -180,7 +230,7 @@ export class SqliteWorkerDb implements WorkerDb {
         updatedAt: new Date(String(row.updated_at)),
         availableAt: new Date(String(row.scheduled_for ?? row.created_at)),
         attempts: Number(row.attempts ?? 0),
-        coalescedCount: Number(payload.coalescedCount ?? 0),
+        coalescedCount: payload.coalescedCount,
       };
     });
   }
