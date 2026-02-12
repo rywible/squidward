@@ -171,7 +171,7 @@ export class SlackSocketModeListener {
     const responseThreadTs = event.thread_ts ?? event.ts;
     const enqueueResult = await this.deps.queue.enqueue({
       dedupeKey: `slack:${channel}:${event.ts ?? Date.now()}`,
-      priority: "P1",
+      priority: "P0",
       payload: {
         taskType: "codex_mission",
         runId,

@@ -28,6 +28,9 @@ export class CodexHarness {
     const command = `printf '%s' '${quoted}' | codex`;
 
     const first = await this.codex.runCommand(command, input.cwd);
+    if (first.exitCode !== 0) {
+      throw new Error(`codex_command_failed:first:${first.exitCode}:${first.artifactRefs.join(" | ").slice(0, 500)}`);
+    }
     const firstRaw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
     try {
       const parsed = parseCodexPayload(firstRaw);
@@ -42,6 +45,9 @@ export class CodexHarness {
       const repairQuoted = shellEscapeSingle(`${prompt}\n\n${repairPrompt}`);
       const secondCmd = `printf '%s' '${repairQuoted}' | codex`;
       const second = await this.codex.runCommand(secondCmd, input.cwd);
+      if (second.exitCode !== 0) {
+        throw new Error(`codex_command_failed:repair:${second.exitCode}:${second.artifactRefs.join(" | ").slice(0, 500)}`);
+      }
       const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
       const parsed = parseCodexPayload(secondRaw);
       this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);

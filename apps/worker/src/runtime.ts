@@ -520,8 +520,8 @@ export class WorkerRuntime {
         const text = `Run ${task.runId}: failed\n${String(error)}`;
         try {
           await this.slack.postMessage(task.responseChannel, text, { threadTs: task.responseThreadTs });
-        } catch {
-          // best effort only
+        } catch (postError) {
+          console.error("[worker] failed to post Slack error reply:", postError);
         }
       }
       await this.db.appendCommandAudit({

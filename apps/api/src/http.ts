@@ -256,7 +256,7 @@ export const createHandler = (options?: HandlerOptions) => {
       db.query(
         `INSERT INTO task_queue
          (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
-         VALUES (?, ?, 'codex_mission', ?, 2, 'queued', ?, ?, ?)`
+         VALUES (?, ?, 'codex_mission', ?, 1, 'queued', ?, ?, ?)`
       ).run(
         crypto.randomUUID(),
         runId,
