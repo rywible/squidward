@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/index.ts",
+    "dev": "bun --env-file=../../.env --watch src/index.ts",
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "start": "bun run src/index.ts",
+    "start": "bun --env-file=../../.env run src/index.ts",
     "test": "bun test"
   },
   "devDependencies": {
