@@ -41,8 +41,28 @@ const toSlackUserReply = (summary: string): string => {
   return reply.length > 1200 ? `${reply.slice(0, 1197)}...` : reply;
 };
 
+const quickSlackReply = (requestText?: string): string | null => {
+  const text = requestText?.trim().toLowerCase() ?? "";
+  if (!text) return null;
+
+  const normalized = text.replace(/[?!.,]/g, " ").replace(/\s+/g, " ").trim();
+  if (
+    /^(you there|u there|are you there|ping|yo|hey|hi|hello|sup|what'?s up)$/.test(normalized) ||
+    /^(you there squidward|ping squidward|hey squidward|hi squidward)$/.test(normalized)
+  ) {
+    return "Yes, I'm here-how can I help?";
+  }
+
+  if (/^(thanks|thank you|thx)$/.test(normalized)) {
+    return "Anytime.";
+  }
+
+  return null;
+};
+
 export type WorkerTaskType =
   | "maintenance"
+  | "slack_chat_reply"
   | "codex_mission"
   | "portfolio_eval"
   | "test_gen"
@@ -316,7 +336,55 @@ export class WorkerRuntime {
 
     const startedAt = this.now();
     try {
-      if (taskType === "codex_mission") {
+      if (taskType === "slack_chat_reply") {
+        const instant = quickSlackReply(task.requestText);
+        if (this.slack && task.responseChannel && instant) {
+          await this.slack.postMessage(task.responseChannel, instant);
+        } else if (this.slack && task.responseChannel && this.codexHarness) {
+          const objective = task.objective ?? task.title ?? "Respond to Slack user message";
+          const domain = "slack_chat";
+          const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
+          const missionPack = buildMissionPack({
+            db: this.sqliteDb as never,
+            task: {
+              ...task,
+              taskType: "slack_chat_reply",
+            },
+            repoPath: task.repoPath ?? this.config.primaryRepoPath,
+            objective,
+            tokenEnvelope,
+            retrievalBudgetTokens: Math.min(900, this.config.retrievalBudgetTokens),
+          });
+          const parsed = await this.codexHarness.run({
+            missionPack,
+            objectiveDetails:
+              task.requestText ??
+              "Respond directly in Slack. Keep concise. Do not describe internal steps unless asked.",
+            cwd: task.cwd ?? this.config.primaryRepoPath,
+            model: task.model,
+          });
+          await this.slack.postMessage(task.responseChannel, toSlackUserReply(parsed.payload.summary));
+        } else if (this.slack && task.responseChannel) {
+          await this.slack.postMessage(task.responseChannel, "I’m here. What do you need?");
+        }
+      } else if (taskType === "codex_mission") {
+        if (this.slack && task.responseChannel && task.domain === "slack") {
+          const fastReply = quickSlackReply(task.requestText);
+          if (fastReply) {
+            await this.slack.postMessage(task.responseChannel, fastReply);
+            await this.db.appendCommandAudit({
+              id: crypto.randomUUID(),
+              runId: task.runId,
+              command: "internal:codex_mission_fast_reply",
+              cwd: task.cwd ?? this.config.primaryRepoPath,
+              startedAt,
+              finishedAt: this.now(),
+              exitCode: 0,
+              artifactRefs: ["fast_path=slack_presence"],
+            });
+            return;
+          }
+        }
         if (!this.codexHarness || !this.memoryGovernor) {
           throw new Error("codex_harness_not_configured");
         }
@@ -583,9 +651,9 @@ export class WorkerRuntime {
         artifactRefs: [`taskType=${taskType}`],
       });
     } catch (error) {
-      if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
+      if ((task.taskType === "codex_mission" || task.taskType === "slack_chat_reply") && this.slack && task.responseChannel) {
         const text =
-          task.domain === "slack"
+          (task.domain ?? "").startsWith("slack")
             ? "I hit an internal error handling that. Try again in a few seconds."
             : `Run ${task.runId}: failed\n${String(error)}`;
         try {

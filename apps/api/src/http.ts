@@ -150,6 +150,20 @@ const isSelfMention = (text: string, selfUserId?: string): boolean => {
   return text.includes(`<@${selfUserId}>`);
 };
 
+const isLikelyHeavySlackRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.length > 220) return true;
+  if (normalized.includes("```") || normalized.includes("`")) return true;
+  if (/(fix|implement|build|refactor|optimize|benchmark|run tests?|open pr|create pr|review|debug|investigate|deploy|rollback)\b/.test(normalized)) {
+    return true;
+  }
+  if (/(\/users\/|~\/projects\/|\.ts\b|\.tsx\b|\.rs\b|\.sql\b|\.json\b|error:|stack:)/.test(normalized)) {
+    return true;
+  }
+  return false;
+};
+
 const isSelfSlackEvent = (
   event: Record<string, unknown>,
   authorizedBotUsers: string[],
@@ -363,31 +377,36 @@ export const createHandler = (options?: HandlerOptions) => {
         return json({ ok: true, accepted: true }, 202);
       }
 
+      const heavy = eventType === "app_mention" || isLikelyHeavySlackRequest(normalizedText);
       const runId = `run_slack_${Date.now()}`;
-      const dedupeKey = `slack:${channel}:${eventTs ?? Date.now()}`;
+      const dedupeKey = `slack:${heavy ? "heavy" : "chat"}:${channel}:${eventTs ?? Date.now()}`;
       db.query(
         `INSERT INTO task_queue
          (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
-         VALUES (?, ?, 'codex_mission', ?, 1, 'queued', ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)`
       ).run(
         crypto.randomUUID(),
         runId,
+        heavy ? "codex_mission" : "slack_chat_reply",
         JSON.stringify({
           dedupeKey,
           payload: {
-            taskType: "codex_mission",
+            taskType: heavy ? "codex_mission" : "slack_chat_reply",
             runId,
-            domain: "slack",
-            objective: "Respond to Slack user request with memory-grounded answer and actions",
-            title: "Slack codex mission",
+            domain: heavy ? "slack" : "slack_chat",
+            objective: heavy
+              ? "Respond to Slack user request with memory-grounded answer and actions"
+              : "Respond to Slack user message quickly and clearly",
+            title: heavy ? "Slack codex mission" : "Slack chat reply",
             requestText: normalizedText,
             responseChannel: channel,
             repoPath: env.PRIMARY_REPO_PATH ?? "",
             cwd: env.PRIMARY_REPO_PATH ?? process.cwd(),
           },
           coalescedCount: 0,
-          title: "Slack codex mission",
+          title: heavy ? "Slack codex mission" : "Slack chat reply",
         }),
+        heavy ? 2 : 1,
         now,
         now,
         now

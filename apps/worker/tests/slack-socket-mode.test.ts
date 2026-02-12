@@ -4,6 +4,7 @@ import { __testOnly } from "../src/slack-socket-mode";
 
 const { isSlackSelfEvent, shouldHandleSlackMessage, isDirectMessageChannel, isSelfMention, normalizeSlackText, parseSlackAllowedUsers } =
   __testOnly;
+const { isLikelyHeavySlackRequest } = __testOnly;
 
 describe("slack socket mode routing", () => {
   it("ignores bot-authored event shapes", () => {
@@ -84,5 +85,10 @@ describe("slack socket mode routing", () => {
   it("detects self mentions", () => {
     expect(isSelfMention("ping <@USQWD>", "USQWD")).toBe(true);
     expect(isSelfMention("ping bot", "USQWD")).toBe(false);
+  });
+
+  it("classifies heavy Slack requests", () => {
+    expect(isLikelyHeavySlackRequest("implement this perf optimization in compiler/src/main.rs")).toBe(true);
+    expect(isLikelyHeavySlackRequest("you there squidward?")).toBe(false);
   });
 });

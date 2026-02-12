@@ -109,6 +109,20 @@ const isSelfMention = (text: string, selfUserId?: string): boolean => {
   return text.includes(`<@${selfUserId}>`);
 };
 
+const isLikelyHeavySlackRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.length > 220) return true;
+  if (normalized.includes("```") || normalized.includes("`")) return true;
+  if (/(fix|implement|build|refactor|optimize|benchmark|run tests?|open pr|create pr|review|debug|investigate|deploy|rollback)\b/.test(normalized)) {
+    return true;
+  }
+  if (/(\/users\/|~\/projects\/|\.ts\b|\.tsx\b|\.rs\b|\.sql\b|\.json\b|error:|stack:)/.test(normalized)) {
+    return true;
+  }
+  return false;
+};
+
   const shouldHandleSlackMessage = (
   eventType: string,
   channel: string,
@@ -305,16 +319,19 @@ export class SlackSocketModeListener {
       return;
     }
 
+    const heavy = eventType === "app_mention" || isLikelyHeavySlackRequest(normalizedText);
     const runId = `run_slack_${Date.now()}`;
     const enqueueResult = await this.deps.queue.enqueue({
-      dedupeKey: `slack:${channel}:${event.ts ?? Date.now()}`,
-      priority: "P0",
+      dedupeKey: `slack:${heavy ? "heavy" : "chat"}:${channel}:${event.ts ?? Date.now()}`,
+      priority: heavy ? "P1" : "P0",
       payload: {
-        taskType: "codex_mission",
+        taskType: heavy ? "codex_mission" : "slack_chat_reply",
         runId,
-        domain: "slack",
-        objective: "Respond to Slack user request with memory-grounded answer and actions",
-        title: "Slack codex mission",
+        domain: heavy ? "slack" : "slack_chat",
+        objective: heavy
+          ? "Respond to Slack user request with memory-grounded answer and actions"
+          : "Respond to Slack user message quickly and clearly",
+        title: heavy ? "Slack codex mission" : "Slack chat reply",
         requestText: normalizedText,
         responseChannel: channel,
         repoPath: this.deps.primaryRepoPath,
@@ -339,5 +356,6 @@ export const __testOnly = {
   isSelfMention,
   parseSlackAllowedUsers,
   isAllowedSlackUser,
+  isLikelyHeavySlackRequest,
   normalizeSlackText,
 };
