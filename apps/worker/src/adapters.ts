@@ -293,7 +293,7 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
   }
 
   async runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }> {
-    const result = await this.execRunner("bash", ["-lc", command], { cwd, env: this.runtimeEnv });
+    const result = await this.execRunner("bash", ["-c", command], { cwd, env: this.runtimeEnv });
 
     return {
       exitCode: result.exitCode,
@@ -317,7 +317,7 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
       };
     }
 
-    const result = await this.execRunner("bash", ["-lc", command], { env: this.runtimeEnv });
+    const result = await this.execRunner("bash", ["-c", command], { env: this.runtimeEnv });
     return {
       ok: result.exitCode === 0,
       details: [result.stdout.trim(), result.stderr.trim()].filter((part) => part.length > 0),

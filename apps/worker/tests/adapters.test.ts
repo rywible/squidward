@@ -129,7 +129,7 @@ describe("real adapters with injected mocks", () => {
     expect(auth.ok).toBe(true);
     expect(calls).toEqual([
       { command: "codex", args: ["--version"] },
-      { command: "bash", args: ["-lc", "codex auth status"] },
+      { command: "bash", args: ["-c", "codex auth status"] },
     ]);
   });
 
