@@ -111,7 +111,7 @@ describe("codex mission harness e2e", () => {
     expect(snapshot).not.toBeNull();
   });
 
-  it("hard fails on malformed output after retry", async () => {
+  it("returns blocked fallback payload on malformed output after retry", async () => {
     const db = new Database(":memory:");
     migrate(db);
     const badAdapter = new FixedOutputCodexAdapter("not-json-at-all");
@@ -123,12 +123,12 @@ describe("codex mission harness e2e", () => {
       objective: "test objective",
       tokenEnvelope: buildTokenEnvelope(db, "general"),
     });
-    await expect(
-      harness.run({
-        missionPack,
-        objectiveDetails: "do it",
-        cwd: "/Users/ryanwible/projects/wrela",
-      })
-    ).rejects.toThrow();
+    const parsed = await harness.run({
+      missionPack,
+      objectiveDetails: "do it",
+      cwd: "/Users/ryanwible/projects/wrela",
+    });
+    expect(parsed.payload.status).toBe("blocked");
+    expect(parsed.payload.summary.length).toBeGreaterThan(0);
   });
 });

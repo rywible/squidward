@@ -2,6 +2,7 @@ import type { Database } from "@squidward/db";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 import type { CodexCliAdapter } from "./adapters";
 import { buildCodexOutputContract, parseCodexPayload, type ParsedCodexPayload } from "./codex-output";
@@ -62,8 +63,11 @@ export class CodexHarness {
         return parsed;
       } catch {
         const repairPrompt = [
-          "Return the exact same payload but strict tagged JSON only.",
-          "No markdown and no prose.",
+          "CRITICAL RETRY: your previous response violated output contract.",
+          "Return ONLY strict tagged JSON payload.",
+          "Do NOT return wrappers like output_text/content/message.",
+          "Do NOT return prose, markdown, analysis, logs, or code fences.",
+          "If you cannot complete the task, return schema-valid payload with status='blocked'.",
           buildCodexOutputContract(),
         ].join("\n");
         const repairFullPrompt = `${prompt}\n\n${repairPrompt}`;
@@ -74,9 +78,13 @@ export class CodexHarness {
         const secondCandidates = buildCommandCandidates(codexCmd, repairQuoted, repairFileQuoted);
         const second = await this.runFirstSuccessful(secondCandidates, input.cwd, "repair");
         const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
-        const parsed = parseCodexPayload(secondRaw);
         this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);
-        return parsed;
+        try {
+          const parsed = parseCodexPayload(secondRaw);
+          return parsed;
+        } catch {
+          return this.coercePayloadFromRaw(secondRaw);
+        }
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -113,5 +121,36 @@ export class CodexHarness {
       cacheHit,
       costEstimate: 0,
     });
+  }
+
+  private coercePayloadFromRaw(raw: string): ParsedCodexPayload {
+    const normalized = raw.trim();
+    const summary =
+      normalized.length > 0
+        ? `Codex response could not be parsed into agent payload. Raw excerpt: ${normalized.slice(0, 360)}`
+        : "Codex response was empty or unparsable.";
+    const payload = {
+      status: "blocked" as const,
+      summary,
+      actionsTaken: [
+        {
+          kind: "analysis" as const,
+          detail: "Captured raw codex output for review and returned blocked status.",
+          evidenceRefs: [],
+        },
+      ],
+      proposedChanges: {
+        files: [],
+        estimatedLoc: 0,
+        risk: "medium" as const,
+      },
+      memoryProposals: [],
+      nextSteps: ["Inspect codex output format and adjust CODEX_MISSION_COMMAND_TEMPLATE if needed."],
+    };
+    return {
+      payload,
+      rawJson: normalized,
+      contextHash: createHash("sha256").update(normalized).digest("hex"),
+    };
   }
 }
