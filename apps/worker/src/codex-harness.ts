@@ -1,4 +1,7 @@
 import type { Database } from "@squidward/db";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { CodexCliAdapter } from "./adapters";
 import { buildCodexOutputContract, parseCodexPayload, type ParsedCodexPayload } from "./codex-output";
@@ -9,6 +12,24 @@ const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.leng
 
 const shellEscapeSingle = (value: string): string => value.replace(/'/g, `'\\''`);
 const codexCliPath = (): string => process.env.CODEX_CLI_PATH?.trim() || "codex";
+const buildCommandCandidates = (codexCmdQuoted: string, promptQuoted: string, promptFileQuoted: string): string[] => {
+  const template = process.env.CODEX_MISSION_COMMAND_TEMPLATE?.trim();
+  if (template) {
+    return [
+      template
+        .replaceAll("{codex}", codexCmdQuoted)
+        .replaceAll("{prompt}", `'${promptQuoted}'`)
+        .replaceAll("{prompt_file}", `'${promptFileQuoted}'`),
+    ];
+  }
+
+  return [
+    `'${codexCmdQuoted}' exec --json --input-file '${promptFileQuoted}'`,
+    `'${codexCmdQuoted}' exec --input-file '${promptFileQuoted}'`,
+    `'${codexCmdQuoted}' exec '${promptQuoted}'`,
+    `printf '%s' '${promptQuoted}' | '${codexCmdQuoted}'`,
+  ];
+};
 
 export interface CodexHarnessRunInput {
   missionPack: MissionPack;
@@ -27,34 +48,59 @@ export class CodexHarness {
     const prompt = `${renderMissionPrompt(input.missionPack, input.objectiveDetails)}\n\n${buildCodexOutputContract()}`;
     const quoted = shellEscapeSingle(prompt);
     const codexCmd = shellEscapeSingle(codexCliPath());
-    const command = `printf '%s' '${quoted}' | '${codexCmd}'`;
-
-    const first = await this.codex.runCommand(command, input.cwd);
-    if (first.exitCode !== 0) {
-      throw new Error(`codex_command_failed:first:${first.exitCode}:${first.artifactRefs.join(" | ").slice(0, 500)}`);
-    }
-    const firstRaw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
+    const tmp = mkdtempSync(join(tmpdir(), "sq-codex-"));
     try {
-      const parsed = parseCodexPayload(firstRaw);
-      this.recordUsage(input, prompt, firstRaw, input.missionPack.cache.hit);
-      return parsed;
-    } catch {
-      const repairPrompt = [
-        "Return the exact same payload but strict tagged JSON only.",
-        "No markdown and no prose.",
-        buildCodexOutputContract(),
-      ].join("\n");
-      const repairQuoted = shellEscapeSingle(`${prompt}\n\n${repairPrompt}`);
-      const secondCmd = `printf '%s' '${repairQuoted}' | '${codexCmd}'`;
-      const second = await this.codex.runCommand(secondCmd, input.cwd);
-      if (second.exitCode !== 0) {
-        throw new Error(`codex_command_failed:repair:${second.exitCode}:${second.artifactRefs.join(" | ").slice(0, 500)}`);
+      const promptFile = join(tmp, "mission-prompt.txt");
+      writeFileSync(promptFile, prompt, "utf8");
+      const promptFileQuoted = shellEscapeSingle(promptFile);
+      const firstCandidates = buildCommandCandidates(codexCmd, quoted, promptFileQuoted);
+      const first = await this.runFirstSuccessful(firstCandidates, input.cwd, "first");
+      const firstRaw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
+      try {
+        const parsed = parseCodexPayload(firstRaw);
+        this.recordUsage(input, prompt, firstRaw, input.missionPack.cache.hit);
+        return parsed;
+      } catch {
+        const repairPrompt = [
+          "Return the exact same payload but strict tagged JSON only.",
+          "No markdown and no prose.",
+          buildCodexOutputContract(),
+        ].join("\n");
+        const repairFullPrompt = `${prompt}\n\n${repairPrompt}`;
+        const repairQuoted = shellEscapeSingle(repairFullPrompt);
+        const repairFile = join(tmp, "mission-repair-prompt.txt");
+        writeFileSync(repairFile, repairFullPrompt, "utf8");
+        const repairFileQuoted = shellEscapeSingle(repairFile);
+        const secondCandidates = buildCommandCandidates(codexCmd, repairQuoted, repairFileQuoted);
+        const second = await this.runFirstSuccessful(secondCandidates, input.cwd, "repair");
+        const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
+        const parsed = parseCodexPayload(secondRaw);
+        this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);
+        return parsed;
       }
-      const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
-      const parsed = parseCodexPayload(secondRaw);
-      this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);
-      return parsed;
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
+  }
+
+  private async runFirstSuccessful(
+    commands: string[],
+    cwd: string,
+    stage: "first" | "repair"
+  ): Promise<{ exitCode: number; artifactRefs: string[] }> {
+    let lastFailure = "no_command_attempted";
+    for (const command of commands) {
+      const result = await this.codex.runCommand(command, cwd);
+      if (result.exitCode === 0) {
+        return result;
+      }
+      const detail = result.artifactRefs.join(" | ").slice(0, 300);
+      lastFailure = `${result.exitCode}:${detail}`;
+      if (!/stdin is not a terminal|unknown option|unknown command|unrecognized option/i.test(detail)) {
+        break;
+      }
+    }
+    throw new Error(`codex_command_failed:${stage}:${lastFailure}`);
   }
 
   private recordUsage(input: CodexHarnessRunInput, prompt: string, output: string, cacheHit: boolean): void {
