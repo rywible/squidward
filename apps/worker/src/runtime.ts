@@ -15,6 +15,32 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
+const extractDraftedQuotedReply = (summary: string): string | null => {
+  if (!/\b(prepared|draft|dispatch|reply|response)\b/i.test(summary)) {
+    return null;
+  }
+  const quoteMatch = summary.match(/["“]([^"”\n]{1,500})["”]/);
+  if (!quoteMatch) {
+    return null;
+  }
+  const candidate = quoteMatch[1].trim();
+  return candidate.length > 0 ? candidate : null;
+};
+
+const toSlackUserReply = (summary: string): string => {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return "Done.";
+  }
+  const quoted = extractDraftedQuotedReply(trimmed);
+  if (quoted) {
+    return quoted;
+  }
+  const firstLine = trimmed.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0);
+  const reply = firstLine ?? trimmed;
+  return reply.length > 1200 ? `${reply.slice(0, 1197)}...` : reply;
+};
+
 export type WorkerTaskType =
   | "maintenance"
   | "codex_mission"
@@ -390,16 +416,10 @@ export class WorkerRuntime {
           objective
         );
         if (this.slack && task.responseChannel) {
-          const evidenceRefs = missionPack.context.retrieval.evidenceRefs.slice(0, 6);
-          const reply = [
-            `Run ${task.runId}: ${parsed.payload.status}`,
-            parsed.payload.summary,
-            `Retrieval query: ${missionPack.context.retrieval.queryId} (${missionPack.context.retrieval.usedTokens}/${missionPack.context.retrieval.budgetTokens} tokens)`,
-            parsed.payload.nextSteps.length > 0 ? `Next: ${parsed.payload.nextSteps.slice(0, 3).join(" | ")}` : "",
-            evidenceRefs.length > 0 ? `Evidence: ${evidenceRefs.join(", ")}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n");
+          const reply = toSlackUserReply(parsed.payload.summary);
+          console.log(
+            `[worker] slack mission reply runId=${task.runId} status=${parsed.payload.status} queryId=${missionPack.context.retrieval.queryId} tokens=${missionPack.context.retrieval.usedTokens}/${missionPack.context.retrieval.budgetTokens}`
+          );
           await this.slack.postMessage(task.responseChannel, reply);
         }
         missionSucceeded = true;
@@ -564,7 +584,10 @@ export class WorkerRuntime {
       });
     } catch (error) {
       if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
-        const text = `Run ${task.runId}: failed\n${String(error)}`;
+        const text =
+          task.domain === "slack"
+            ? "I hit an internal error handling that. Try again in a few seconds."
+            : `Run ${task.runId}: failed\n${String(error)}`;
         try {
           await this.slack.postMessage(task.responseChannel, text);
         } catch (postError) {
