@@ -15,6 +15,38 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
+const extractQuotedReply = (summary: string): string | null => {
+  const match = summary.match(/["“]([^"”\n]{1,1200})["”]/);
+  return match?.[1]?.trim() || null;
+};
+
+const toSlackUserReply = (summary: string): string => {
+  const trimmed = summary.trim();
+  if (!trimmed) return "Done.";
+  const quoted = extractQuotedReply(trimmed);
+  if (quoted) return quoted;
+  const firstLine = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  const candidate = firstLine ?? trimmed;
+  if (/^(prepared|drafted|assembled|queued|planned)\b/i.test(candidate) && /\breply\b/i.test(candidate)) {
+    return "On it. What do you want me to prioritize first?";
+  }
+  return candidate.length > 1200 ? `${candidate.slice(0, 1197)}...` : candidate;
+};
+
+const buildSlackUserReplyObjective = (requestText: string): string =>
+  [
+    requestText,
+    "",
+    "Slack reply contract:",
+    "- `summary` must be the exact user-facing message text.",
+    "- No internal/meta language (prepared, drafted, dispatch, retrieval, evidence, mission).",
+    "- No process narration or tool mentions.",
+    "- Keep it direct and concise.",
+  ].join("\n");
+
 export type WorkerTaskType =
   | "maintenance"
   | "codex_mission"
@@ -316,7 +348,10 @@ export class WorkerRuntime {
         });
         const parsed = await this.codexHarness.run({
           missionPack,
-          objectiveDetails: task.requestText ?? task.command ?? objective,
+          objectiveDetails:
+            task.domain === "slack" && task.responseChannel
+              ? buildSlackUserReplyObjective(task.requestText ?? task.command ?? objective)
+              : (task.requestText ?? task.command ?? objective),
           cwd: executionCwd,
           model: task.model,
         });
@@ -390,17 +425,7 @@ export class WorkerRuntime {
           objective
         );
         if (this.slack && task.responseChannel) {
-          const evidenceRefs = missionPack.context.retrieval.evidenceRefs.slice(0, 6);
-          const reply = [
-            `Run ${task.runId}: ${parsed.payload.status}`,
-            parsed.payload.summary,
-            `Retrieval query: ${missionPack.context.retrieval.queryId} (${missionPack.context.retrieval.usedTokens}/${missionPack.context.retrieval.budgetTokens} tokens)`,
-            parsed.payload.nextSteps.length > 0 ? `Next: ${parsed.payload.nextSteps.slice(0, 3).join(" | ")}` : "",
-            evidenceRefs.length > 0 ? `Evidence: ${evidenceRefs.join(", ")}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n");
-          await this.slack.postMessage(task.responseChannel, reply, { threadTs: task.responseThreadTs });
+          await this.slack.postMessage(task.responseChannel, toSlackUserReply(parsed.payload.summary));
         }
         missionSucceeded = true;
         } finally {
@@ -564,9 +589,9 @@ export class WorkerRuntime {
       });
     } catch (error) {
       if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
-        const text = `Run ${task.runId}: failed\n${String(error)}`;
+        const text = `I hit an execution issue on that request (${task.runId}). Please retry in a moment.`;
         try {
-          await this.slack.postMessage(task.responseChannel, text, { threadTs: task.responseThreadTs });
+          await this.slack.postMessage(task.responseChannel, text);
         } catch (postError) {
           console.error("[worker] failed to post Slack error reply:", postError);
         }
