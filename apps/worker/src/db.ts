@@ -213,6 +213,14 @@ export class SqliteWorkerDb implements WorkerDb {
   async appendCommandAudit(record: CommandAuditRecord): Promise<void> {
     this.db
       .query(
+        `INSERT OR IGNORE INTO agent_runs
+         (id, trigger_type, objective, actions, outcome, rollback_flag, duration, created_at)
+         VALUES (?, 'audit_auto_seed', 'Auto-seeded run for command audit', '[]', 'completed', 0, 0, ?)`
+      )
+      .run(record.runId, record.startedAt.toISOString());
+
+    this.db
+      .query(
         `INSERT INTO command_audit
          (id, run_id, command, cwd, started_at, finished_at, exit_code, artifact_refs)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
