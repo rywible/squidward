@@ -45,10 +45,81 @@ const stripCodeFences = (value: string): string =>
     .replace(/```/g, "")
     .trim();
 
+const escapeNewlinesInJsonStrings = (value: string): string => {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (inString) {
+      if (escaped) {
+        output += char;
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        output += char;
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+        output += char;
+        continue;
+      }
+      if (char === "\n") {
+        output += "\\n";
+        continue;
+      }
+      if (char === "\r") {
+        output += "";
+        continue;
+      }
+      if (char === "\t") {
+        output += "\\t";
+        continue;
+      }
+      output += char;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    }
+    output += char;
+  }
+  return output;
+};
+
 const normalizeCandidateJson = (value: string): string => {
-  const stripped = stripCodeFences(value);
+  const stripped = stripCodeFences(value).replace(/\r?\n/g, " ");
+  const escaped = escapeNewlinesInJsonStrings(stripped);
   // Common recovery for trailing commas before closing delimiters.
-  return stripped.replace(/,\s*([}\]])/g, "$1");
+  return escaped.replace(/,\s*([}\]])/g, "$1");
+};
+
+export const extractTaggedPayloadBlocks = (raw: string): string[] => {
+  const blocks: string[] = [];
+  const contentRe = new RegExp(`${START_TAG}([\\s\\S]*?)${END_TAG}`, "g");
+  let match: RegExpExecArray | null;
+  while ((match = contentRe.exec(raw)) !== null) {
+    const block = match[1].trim();
+    if (block.length > 0) {
+      blocks.push(block);
+    }
+  }
+  if (blocks.length > 0) {
+    return blocks;
+  }
+  const startOnly = raw.indexOf(START_TAG);
+  const endOnly = raw.indexOf(END_TAG);
+  if (startOnly >= 0 && endOnly > startOnly) {
+    const block = raw.slice(startOnly + START_TAG.length, endOnly).trim();
+    if (block.length > 0) {
+      blocks.push(block);
+    }
+  }
+  return blocks;
 };
 
 const parseJsonSafe = (value: string): unknown | null => {
@@ -100,9 +171,14 @@ const extractTextCandidates = (value: unknown, output: string[], depth = 0): voi
 
 const gatherPayloadCandidates = (raw: string): string[] => {
   const candidates: string[] = [];
-  const directTagged = extractTaggedPayload(raw);
-  if (directTagged) {
-    candidates.push(directTagged);
+  const taggedBlocks = extractTaggedPayloadBlocks(raw);
+  if (taggedBlocks.length > 0) {
+    candidates.push(...taggedBlocks);
+  } else {
+    const directTagged = extractTaggedPayload(raw);
+    if (directTagged) {
+      candidates.push(directTagged);
+    }
   }
 
   const directJson = parseJsonSafe(raw);
@@ -114,16 +190,19 @@ const gatherPayloadCandidates = (raw: string): string[] => {
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
+    const lineJson = parseJsonSafe(trimmed);
+    if (lineJson) {
+      if (looksLikePayloadObject(lineJson)) {
+        candidates.push(JSON.stringify(lineJson));
+      }
+      extractTextCandidates(lineJson, candidates);
+    }
+
     const lineTagged = extractTaggedPayload(trimmed);
     if (lineTagged) {
       candidates.push(lineTagged);
       continue;
     }
-    const lineJson = parseJsonSafe(trimmed);
-    if (looksLikePayloadObject(lineJson)) {
-      candidates.push(JSON.stringify(lineJson));
-    }
-    extractTextCandidates(lineJson, candidates);
   }
 
   candidates.push(raw);
@@ -194,17 +273,57 @@ export const parseCodexPayload = (raw: string): ParsedCodexPayload => {
   let parsed: unknown | null = null;
   let parsedSource = "";
   for (const candidate of candidates) {
-    try {
-      parsed = JSON.parse(candidate) as unknown;
-      parsedSource = candidate;
+    const reparsed = tryParseJson(candidate);
+    if (reparsed) {
+      parsed = reparsed.value;
+      parsedSource = reparsed.source;
       break;
-    } catch {
-      // Continue to fallback candidate.
     }
   }
   if (!parsed || typeof parsed !== "object") {
     throw new Error("invalid_json_payload");
   }
+
+  return buildPayloadFromParsed(parsed, parsedSource);
+};
+
+const tryParseJson = (value: string): { value: unknown; source: string } | null => {
+  const normalized = normalizeCandidateJson(value);
+  const candidates = [value, normalized];
+  const bracketSliced = [value, normalized].map((item) => {
+    const start = item.indexOf("{");
+    const end = item.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      return item.slice(start, end + 1);
+    }
+    return "";
+  });
+  const allCandidates = [...candidates, ...bracketSliced];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    try {
+      return { value: JSON.parse(candidate), source: candidate };
+    } catch {
+      // continue
+    }
+  }
+  for (const candidate of allCandidates) {
+    if (!candidate) {
+      continue;
+    }
+    const withEscapedNewlines = candidate.replace(/\\n/g, " ");
+    try {
+      return { value: JSON.parse(withEscapedNewlines), source: withEscapedNewlines };
+    } catch {
+      // continue
+    }
+  }
+  return null;
+};
+
+const buildPayloadFromParsed = (parsed: unknown, parsedSource: string): ParsedCodexPayload => {
   const row = parsed as Record<string, unknown>;
   const statusRaw = String(row.status ?? "");
   if (statusRaw !== "done" && statusRaw !== "blocked" && statusRaw !== "needs_input") {
@@ -260,6 +379,7 @@ export const buildCodexOutputContract = (): string => {
     "You MUST output exactly one payload between tags. No additional text before/after tags.",
     `Line 1 must be exactly: ${START_TAG}`,
     "Line 2..N-1 must be exactly one valid JSON object.",
+    "If a JSON string needs a newline, encode it as \\\\n (do NOT emit raw newline characters).",
     `Final line must be exactly: ${END_TAG}`,
     "No markdown fences.",
     "No explanations.",

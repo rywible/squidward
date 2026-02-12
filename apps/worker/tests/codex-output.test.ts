@@ -34,4 +34,38 @@ describe("codex output harness", () => {
     expect(parsed.payload.status).toBe("done");
     expect(parsed.payload.summary).toBe("wrapped ok");
   });
+
+  it("repairs raw newlines inside tagged payload strings", () => {
+    const payload = [
+      "BEGIN_AGENT_PAYLOAD",
+      '{"status":"done","summary":"Prepared safe\nNext: add coverage","actionsTaken":[{"kind":"analysis","detail":"review","evidenceRefs":["a1"]}],"proposedChanges":{"files":["x.rs"],"estimatedLoc":4,"risk":"low"},"memoryProposals":[],"nextSteps":["nothing"]}',
+      "END_AGENT_PAYLOAD",
+    ].join("\n");
+    const parsed = parseCodexPayload(payload);
+    expect(parsed.payload.status).toBe("done");
+    expect(parsed.payload.summary).toBe("Prepared safe Next: add coverage");
+  });
+
+  it("extracts payload from codex event stream where JSON is inside text field", () => {
+    const payload = [
+      "BEGIN_AGENT_PAYLOAD",
+      '{"status":"done","summary":"streamed","actionsTaken":[],"proposedChanges":{"files":[],"estimatedLoc":0,"risk":"low"},"memoryProposals":[],"nextSteps":[]}',
+      "END_AGENT_PAYLOAD",
+    ].join("\n");
+    const wrappedStream = [
+      JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_0",
+          type: "agent_message",
+          text: payload,
+        },
+      }),
+      JSON.stringify({ type: "turn.finished" }),
+    ].join("\n");
+    const parsed = parseCodexPayload(wrappedStream);
+    expect(parsed.payload.status).toBe("done");
+    expect(parsed.payload.summary).toBe("streamed");
+  });
 });
