@@ -97,6 +97,7 @@ export class WorkerRuntime {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private heartbeating = false;
+  private heartbeatPending = false;
 
   constructor(deps: WorkerRuntimeDeps) {
     this.db = deps.db;
@@ -147,6 +148,7 @@ export class WorkerRuntime {
 
   async heartbeat(): Promise<void> {
     if (this.heartbeating) {
+      this.heartbeatPending = true;
       return;
     }
     this.heartbeating = true;
@@ -207,12 +209,22 @@ export class WorkerRuntime {
       this.scheduleNext();
     } finally {
       this.heartbeating = false;
+      if (this.heartbeatPending) {
+        this.heartbeatPending = false;
+        queueMicrotask(() => {
+          void this.heartbeat();
+        });
+      }
     }
   }
 
   async poke(): Promise<void> {
     if (!this.started) {
       return;
+    }
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
     }
     await this.heartbeat();
   }
@@ -242,6 +254,7 @@ export class WorkerRuntime {
       };
     }
     const taskType = task.taskType ?? "maintenance";
+    console.log(`[worker] executing task type=${taskType} runId=${task.runId}`);
     if (taskType === "maintenance") {
       await this.audit.runWithAudit(task.runId, task.command ?? "true", task.cwd ?? process.cwd());
       return;

@@ -169,7 +169,7 @@ export class SlackSocketModeListener {
 
     const runId = `run_slack_${Date.now()}`;
     const responseThreadTs = event.thread_ts ?? event.ts;
-    await this.deps.queue.enqueue({
+    const enqueueResult = await this.deps.queue.enqueue({
       dedupeKey: `slack:${channel}:${event.ts ?? Date.now()}`,
       priority: "P1",
       payload: {
@@ -185,7 +185,9 @@ export class SlackSocketModeListener {
         cwd: this.deps.primaryRepoPath,
       },
     });
-    console.log(`[slack-socket] queued mission for channel=${channel} ts=${event.ts ?? "n/a"}`);
+    console.log(
+      `[slack-socket] queued mission for channel=${channel} ts=${event.ts ?? "n/a"} coalesced=${enqueueResult.coalesced}`
+    );
 
     if (this.deps.onTaskQueued) {
       await this.deps.onTaskQueued();
