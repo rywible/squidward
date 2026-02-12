@@ -103,6 +103,7 @@ const runtime = new WorkerRuntime({
     primaryRepoPath:
       process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
     retrievalBudgetTokens: Number(process.env.RETRIEVAL_BUDGET_TOKENS ?? 4000),
+    maxTasksPerHeartbeat: Number(process.env.MAX_TASKS_PER_HEARTBEAT ?? 8),
     perfScientist: {
       enabled: process.env.PERF_SCIENTIST_ENABLED === "1",
       nightlyHour: Number(process.env.PERF_SCIENTIST_NIGHTLY_HOUR ?? 2),

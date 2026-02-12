@@ -67,6 +67,7 @@ export interface WorkerRuntimeDeps {
     graphReindexIntervalMinutes?: number;
     primaryRepoPath?: string;
     retrievalBudgetTokens?: number;
+    maxTasksPerHeartbeat?: number;
     perfScientist?: Partial<PerfScientistConfig>;
   };
   now?: () => Date;
@@ -121,6 +122,7 @@ export class WorkerRuntime {
       graphReindexIntervalMinutes: deps.config?.graphReindexIntervalMinutes ?? 60,
       primaryRepoPath: deps.config?.primaryRepoPath ?? process.cwd(),
       retrievalBudgetTokens: Math.max(512, Math.min(16000, deps.config?.retrievalBudgetTokens ?? 4000)),
+      maxTasksPerHeartbeat: Math.max(1, Math.min(50, deps.config?.maxTasksPerHeartbeat ?? 8)),
       perfScientist: {
         enabled: deps.config?.perfScientist?.enabled ?? false,
         nightlyHour: deps.config?.perfScientist?.nightlyHour ?? 2,
@@ -175,24 +177,29 @@ export class WorkerRuntime {
 
       if (workerMode !== "paused") {
         try {
-          await this.queue.processNext(async (task) => {
-            const session = this.sessions.start(task.id);
-            try {
-              const payload =
-                task.payload && typeof task.payload === "object"
-                  ? (task.payload as WorkerTaskPayload)
-                  : ({
-                      taskType: "maintenance",
-                      runId: task.id,
-                      command: "true",
-                      cwd: this.config.primaryRepoPath,
-                      title: "Recovered malformed queue payload",
-                    } as WorkerTaskPayload);
-              await this.executeTask(payload);
-            } finally {
-              this.sessions.end(session.id);
+          for (let i = 0; i < this.config.maxTasksPerHeartbeat; i += 1) {
+            const processed = await this.queue.processNext(async (task) => {
+              const session = this.sessions.start(task.id);
+              try {
+                const payload =
+                  task.payload && typeof task.payload === "object"
+                    ? (task.payload as WorkerTaskPayload)
+                    : ({
+                        taskType: "maintenance",
+                        runId: task.id,
+                        command: "true",
+                        cwd: this.config.primaryRepoPath,
+                        title: "Recovered malformed queue payload",
+                      } as WorkerTaskPayload);
+                await this.executeTask(payload);
+              } finally {
+                this.sessions.end(session.id);
+              }
+            });
+            if (!processed) {
+              break;
             }
-          });
+          }
         } catch (error) {
           console.error("[worker] task execution failed:", error);
         }

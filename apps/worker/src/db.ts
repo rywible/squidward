@@ -40,7 +40,7 @@ const normalizeStatus = (status: string): QueueItemStatus => {
   return "queued";
 };
 
-const parseQueueEnvelope = (rawPayloadJson: string, sourceId: string, rowId: string): {
+const parseQueueEnvelope = (rawPayloadJson: string, sourceId: string, rowId: string, defaultTaskType = "maintenance"): {
   dedupeKey: string;
   payload: unknown;
   coalescedCount: number;
@@ -69,6 +69,7 @@ const parseQueueEnvelope = (rawPayloadJson: string, sourceId: string, rowId: str
     const withRunId = {
       ...(payloadObject as Record<string, unknown>),
       runId: (payloadObject as { runId?: string }).runId ?? sourceId ?? rowId,
+      taskType: (payloadObject as { taskType?: string }).taskType ?? defaultTaskType,
     };
     return {
       dedupeKey:
@@ -92,6 +93,7 @@ const parseQueueEnvelope = (rawPayloadJson: string, sourceId: string, rowId: str
     payload: {
       ...legacyPayloadObject,
       runId: (legacyPayloadObject as { runId?: string }).runId ?? sourceId ?? rowId,
+      taskType: (legacyPayloadObject as { taskType?: string }).taskType ?? defaultTaskType,
     },
     coalescedCount: 0,
   };
@@ -175,7 +177,7 @@ export class SqliteWorkerDb implements WorkerDb {
   async findCoalescibleQueueItem(dedupeKey: string, threshold: Date): Promise<QueueItem | null> {
     const row = this.db
       .query(
-        `SELECT id, source_id, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at
+        `SELECT id, source_id, task_type, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at
          FROM task_queue
          WHERE status IN ('queued','running')
            AND json_extract(payload_json, '$.dedupeKey') = ?
@@ -189,7 +191,12 @@ export class SqliteWorkerDb implements WorkerDb {
       return null;
     }
 
-    const payload = parseQueueEnvelope(String(row.payload_json), String(row.source_id ?? row.id), String(row.id));
+    const payload = parseQueueEnvelope(
+      String(row.payload_json),
+      String(row.source_id ?? row.id),
+      String(row.id),
+      String(row.task_type ?? "maintenance")
+    );
 
     return {
       id: String(row.id),
@@ -208,7 +215,7 @@ export class SqliteWorkerDb implements WorkerDb {
   async listReadyQueueItems(limit: number, now: Date): Promise<QueueItem[]> {
     const rows = this.db
       .query(
-        `SELECT id, source_id, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at
+        `SELECT id, source_id, task_type, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at
          FROM task_queue
          WHERE status='queued'
            AND (scheduled_for IS NULL OR scheduled_for <= ?)
@@ -218,7 +225,12 @@ export class SqliteWorkerDb implements WorkerDb {
       .all(now.toISOString(), limit) as SqlRecord[];
 
     return rows.map((row) => {
-      const payload = parseQueueEnvelope(String(row.payload_json), String(row.source_id ?? row.id), String(row.id));
+      const payload = parseQueueEnvelope(
+        String(row.payload_json),
+        String(row.source_id ?? row.id),
+        String(row.id),
+        String(row.task_type ?? "maintenance")
+      );
 
       return {
         id: String(row.id),

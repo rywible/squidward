@@ -37,6 +37,7 @@ const KEY_ORDER = [
   "MEMO_WEEKDAY",
   "MEMO_HOUR",
   "GRAPH_REINDEX_CRON",
+  "MAX_TASKS_PER_HEARTBEAT",
   "PERF_SCIENTIST_ENABLED",
   "PERF_SCIENTIST_REPO_PATH",
   "PERF_SCIENTIST_BENCHMARK_ROOT",
@@ -265,6 +266,12 @@ const main = async (): Promise<void> => {
       "Retrieval context token budget",
       env.RETRIEVAL_BUDGET_TOKENS,
       "4000"
+    );
+    env.MAX_TASKS_PER_HEARTBEAT = await prompt(
+      rl,
+      "Max tasks processed per heartbeat",
+      env.MAX_TASKS_PER_HEARTBEAT,
+      "8"
     );
 
     printSection("Perf Scientist");

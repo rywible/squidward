@@ -31,4 +31,23 @@ describe("SqliteWorkerDb queue compatibility", () => {
     expect((item?.payload as { runId?: string }).runId).toBe("legacy_run_1");
     expect((item?.payload as { taskType?: string }).taskType).toBe("maintenance");
   });
+
+  it("falls back to row task_type when payload is missing taskType", async () => {
+    const dbPath = makeDbPath();
+    const workerDb = new SqliteWorkerDb({ dbPath });
+
+    const rawDb = new Database(dbPath, { create: true, strict: false });
+    rawDb.query(
+      `INSERT INTO task_queue
+       (id, source_id, task_type, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at, last_error)
+       VALUES
+       ('legacy_task_2', 'legacy_run_2', 'codex_mission', '{"requestText":"hello from slack"}', 1, 'queued', datetime('now'), 0, datetime('now'), datetime('now'), NULL)`
+    ).run();
+
+    const ready = await workerDb.listReadyQueueItems(10, new Date());
+    const item = ready.find((entry) => entry.id === "legacy_task_2");
+    expect(item).toBeTruthy();
+    expect((item?.payload as { taskType?: string }).taskType).toBe("codex_mission");
+    expect((item?.payload as { runId?: string }).runId).toBe("legacy_run_2");
+  });
 });
