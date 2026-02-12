@@ -1,7 +1,7 @@
 import { Database } from "@squidward/db";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type { GithubGhAdapter, SlackAdapter } from "./adapters";
 import type { CommandAuditService } from "./audit";
@@ -180,6 +180,20 @@ const resolveArtifactDir = (repoPath: string): string => {
   return artifactDir;
 };
 
+export const resolveBenchmarkRoot = (configuredRoot: string, manifestPath: string): string => {
+  const manifestDir = dirname(manifestPath);
+  if (!existsSync(manifestDir)) {
+    return configuredRoot;
+  }
+
+  // Wrela perf/perfcmp commands expect a suite path like benchmarks/macro.
+  // If the configured root is the parent benchmarks directory, use the manifest suite directory.
+  if (configuredRoot === dirname(manifestDir)) {
+    return manifestDir;
+  }
+  return configuredRoot;
+};
+
 const runGit = (repoPath: string, args: string[]): { ok: boolean; stdout: string; stderr: string } => {
   const proc = Bun.spawnSync(["git", ...args], {
     cwd: repoPath,
@@ -296,6 +310,7 @@ export class PerfScientist {
     const commit = runGit(this.config.repoPath, ["rev-parse", "HEAD"]);
     const commitSha = commit.ok ? commit.stdout : "unknown";
     const artifactDir = resolveArtifactDir(this.config.repoPath);
+    const benchmarkRoot = resolveBenchmarkRoot(this.config.benchmarkRoot, this.config.manifestPath);
     const baselinePath = join(artifactDir, `baseline-${params.profile}-${Date.now()}.json`);
 
     const runId = crypto.randomUUID();
@@ -315,7 +330,7 @@ export class PerfScientist {
         nowIso()
       );
 
-    const command = `cargo run -q --bin wrela -- perf --runs=${params.runs} --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-out="${baselinePath}" "${this.config.benchmarkRoot}"`;
+    const command = `cargo run -q --bin wrela -- perf --runs=${params.runs} --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-out="${baselinePath}" "${benchmarkRoot}"`;
 
     const result = await this.audit.runWithAudit(params.runId, command, this.config.repoPath);
 
@@ -543,6 +558,7 @@ export class PerfScientist {
     }
 
     const artifactDir = resolveArtifactDir(this.config.repoPath);
+    const benchmarkRoot = resolveBenchmarkRoot(this.config.benchmarkRoot, this.config.manifestPath);
     const candidatePerfPath = join(artifactDir, `candidate-${params.candidateId}-${Date.now()}.json`);
     const perfcmpPath = join(artifactDir, `perfcmp-${params.candidateId}-${Date.now()}.json`);
 
@@ -564,7 +580,7 @@ export class PerfScientist {
         nowIso()
       );
 
-    const perfCommand = `cargo run -q --bin wrela -- perf --runs=${params.runs} --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-out="${candidatePerfPath}" "${this.config.benchmarkRoot}"`;
+    const perfCommand = `cargo run -q --bin wrela -- perf --runs=${params.runs} --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-out="${candidatePerfPath}" "${benchmarkRoot}"`;
     const perfResult = await this.audit.runWithAudit(params.runId, perfCommand, this.config.repoPath);
 
     this.db
@@ -599,7 +615,7 @@ export class PerfScientist {
         nowIso()
       );
 
-    const perfcmpCommand = `cargo run -q --bin wrela -- perfcmp --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-ref=${this.config.baseRefForPerfCmp} --candidate-ref=HEAD --min-effect-pct=${this.config.minEffectPct} --confidence=${this.config.confidencePct} -o "${perfcmpPath}" "${this.config.benchmarkRoot}"`;
+    const perfcmpCommand = `cargo run -q --bin wrela -- perfcmp --profile=${params.profile} --benchmark-manifest="${this.config.manifestPath}" --baseline-ref=${this.config.baseRefForPerfCmp} --candidate-ref=HEAD --min-effect-pct=${this.config.minEffectPct} --confidence=${this.config.confidencePct} -o "${perfcmpPath}" "${benchmarkRoot}"`;
     const perfcmpResult = await this.audit.runWithAudit(params.runId, perfcmpCommand, this.config.repoPath);
 
     this.db

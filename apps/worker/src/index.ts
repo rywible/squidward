@@ -51,7 +51,7 @@ const perfScientist = new PerfScientist(
     resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
   benchmarkRoot:
     process.env.PERF_SCIENTIST_BENCHMARK_ROOT ??
-    resolve(process.env.HOME ?? process.cwd(), "projects/wrela/benchmarks"),
+    resolve(process.env.HOME ?? process.cwd(), "projects/wrela/benchmarks/macro"),
   manifestPath:
     process.env.PERF_SCIENTIST_MANIFEST_PATH ??
     resolve(process.env.HOME ?? process.cwd(), "projects/wrela/benchmarks/macro/bench.toml"),
@@ -123,6 +123,14 @@ const writePreflightAudit = async (
 
 const runStartupPreflight = async (): Promise<void> => {
   const runId = `startup-preflight:${new Date().toISOString()}`;
+  const createdAt = new Date().toISOString();
+  db.db
+    .query(
+      `INSERT OR IGNORE INTO agent_runs
+       (id, trigger_type, objective, actions, outcome, rollback_flag, duration, created_at)
+       VALUES (?, 'startup_preflight', 'Startup integration/tooling preflight', '[]', 'completed', 0, 0, ?)`
+    )
+    .run(runId, createdAt);
 
   try {
     const gh = await ghAdapter.preflightAuth();

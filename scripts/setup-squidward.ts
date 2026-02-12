@@ -270,7 +270,7 @@ const main = async (): Promise<void> => {
       rl,
       "Perf benchmark root",
       env.PERF_SCIENTIST_BENCHMARK_ROOT,
-      `${env.PERF_SCIENTIST_REPO_PATH}/benchmarks`
+      `${env.PERF_SCIENTIST_REPO_PATH}/benchmarks/macro`
     );
     env.PERF_SCIENTIST_MANIFEST_PATH = await prompt(
       rl,
