@@ -59,7 +59,13 @@ export const storeRetrievalCache = (input: StoreInput): void => {
     .query(
       `INSERT INTO context_cache
        (id, cache_key, summary_text, source_fingerprint, token_size, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, datetime('now', ?), datetime('now'))`
+       VALUES (?, ?, ?, ?, ?, datetime('now', ?), datetime('now'))
+       ON CONFLICT(cache_key) DO UPDATE SET
+         summary_text=excluded.summary_text,
+         source_fingerprint=excluded.source_fingerprint,
+         token_size=excluded.token_size,
+         expires_at=excluded.expires_at,
+         created_at=excluded.created_at`
     )
     .run(
       crypto.randomUUID(),

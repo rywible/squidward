@@ -144,7 +144,13 @@ export const buildMissionPack = (input: {
       db.query(
         `INSERT INTO context_cache
          (id, cache_key, summary_text, source_fingerprint, token_size, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, datetime('now', '+6 hour'), ?)`
+         VALUES (?, ?, ?, ?, ?, datetime('now', '+6 hour'), ?)
+         ON CONFLICT(cache_key) DO UPDATE SET
+           summary_text=excluded.summary_text,
+           source_fingerprint=excluded.source_fingerprint,
+           token_size=excluded.token_size,
+           expires_at=excluded.expires_at,
+           created_at=excluded.created_at`
       ).run(crypto.randomUUID(), cacheKey, summary, sourceFingerprint, Math.ceil(summary.length / 4), nowIso());
     }
   }
