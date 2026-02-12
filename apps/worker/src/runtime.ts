@@ -47,6 +47,38 @@ const buildSlackUserReplyObjective = (requestText: string): string =>
     "- Keep it direct and concise.",
   ].join("\n");
 
+const isScheduleIntrospectionRequest = (text?: string): boolean => {
+  const normalized = (text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /(upcoming|planned|queue|queued|cron|schedule|heartbeat|what tasks)/.test(normalized);
+};
+
+const formatScheduleSummary = (input: {
+  queuedCount: number;
+  memoWeekday: number;
+  memoHour: number;
+  graphReindexIntervalMinutes: number;
+  perfEnabled: boolean;
+  perfNightlyHour: number;
+  perfSmokeOnChange: boolean;
+}): string => {
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][Math.max(0, Math.min(6, input.memoWeekday))] ?? "Mon";
+  const lines: string[] = [];
+  lines.push(`Queued right now: ${input.queuedCount} task(s).`);
+  lines.push("Scheduled cadence:");
+  lines.push("- Portfolio ranker: daily");
+  lines.push("- Test evolution: every 10 minutes");
+  lines.push(`- CTO memo: weekly (${weekday} @ ${String(input.memoHour).padStart(2, "0")}:00)`);
+  lines.push(`- Graph reindex: every ${input.graphReindexIntervalMinutes} minutes`);
+  if (input.perfEnabled) {
+    lines.push(`- APS nightly baseline: daily @ ${String(input.perfNightlyHour).padStart(2, "0")}:00`);
+    lines.push(`- APS smoke on repo change: ${input.perfSmokeOnChange ? "enabled" : "disabled"}`);
+  } else {
+    lines.push("- APS: disabled");
+  }
+  return lines.join("\n");
+};
+
 export type WorkerTaskType =
   | "maintenance"
   | "codex_mission"
@@ -323,6 +355,30 @@ export class WorkerRuntime {
     const startedAt = this.now();
     try {
       if (taskType === "codex_mission") {
+        if (this.slack && task.responseChannel && task.domain === "slack" && isScheduleIntrospectionRequest(task.requestText)) {
+          const queuedCount = await this.db.countReadyQueueItems(this.now());
+          const scheduleReply = formatScheduleSummary({
+            queuedCount,
+            memoWeekday: this.config.memoWeekday,
+            memoHour: this.config.memoHour,
+            graphReindexIntervalMinutes: this.config.graphReindexIntervalMinutes,
+            perfEnabled: this.config.perfScientist.enabled ?? false,
+            perfNightlyHour: this.config.perfScientist.nightlyHour ?? 2,
+            perfSmokeOnChange: this.config.perfScientist.smokeOnChange ?? true,
+          });
+          await this.slack.postMessage(task.responseChannel, scheduleReply);
+          await this.db.appendCommandAudit({
+            id: crypto.randomUUID(),
+            runId: task.runId,
+            command: "internal:slack_schedule_introspection",
+            cwd: task.cwd ?? this.config.primaryRepoPath,
+            startedAt,
+            finishedAt: this.now(),
+            exitCode: 0,
+            artifactRefs: [`queuedCount=${queuedCount}`],
+          });
+          return;
+        }
         if (!this.codexHarness || !this.memoryGovernor) {
           throw new Error("codex_harness_not_configured");
         }

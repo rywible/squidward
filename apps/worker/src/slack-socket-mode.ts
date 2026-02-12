@@ -19,6 +19,10 @@ interface SlackEnvelope {
     event?: {
       type?: string;
       subtype?: string;
+      app_id?: string;
+      bot_id?: string;
+      user?: string;
+      client_msg_id?: string;
       text?: string;
       channel?: string;
       ts?: string;
@@ -42,6 +46,25 @@ const parseRetrievalFeedbackCommand = (
 };
 
 const normalizeSlackText = (text: string): string => text.replace(/<@[A-Z0-9]+>/g, "").trim();
+const parseAllowedUsers = (): string[] =>
+  (process.env.SLACK_TRIGGER_USER_IDS ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+const shouldIgnoreSelfOrBotEvent = (event: {
+  subtype?: string;
+  app_id?: string;
+  bot_id?: string;
+  user?: string;
+}): boolean => {
+  if (event.subtype) return true;
+  if (event.app_id) return true;
+  if (event.bot_id) return true;
+  const selfUserId = (process.env.SLACK_BOT_USER_ID ?? "").trim();
+  if (selfUserId && event.user === selfUserId) return true;
+  return false;
+};
 
 export class SlackSocketModeListener {
   private readonly deps: SlackSocketModeListenerDeps;
@@ -142,11 +165,23 @@ export class SlackSocketModeListener {
 
     const eventType = event.type ?? "";
     const subtype = event.subtype ?? "";
+    const user = event.user;
+    const clientMsgId = event.client_msg_id;
     const channel = event.channel ?? "";
     const text = event.text ?? "";
     if (!channel || !text.trim()) return;
+    if (shouldIgnoreSelfOrBotEvent(event)) return;
+    if (eventType === "message" && !clientMsgId) return;
     if (eventType === "message" && subtype === "bot_message") return;
     if (eventType !== "message" && eventType !== "app_mention") return;
+    const threadTs = event.thread_ts;
+    const eventTs = event.ts;
+    if (threadTs && eventTs && threadTs !== eventTs) return;
+
+    const allowedUsers = parseAllowedUsers();
+    if (allowedUsers.length > 0 && (!user || !allowedUsers.includes(user))) {
+      return;
+    }
 
     const normalizedText = normalizeSlackText(text) || text.trim();
     const feedback = parseRetrievalFeedbackCommand(normalizedText);
@@ -168,7 +203,6 @@ export class SlackSocketModeListener {
     }
 
     const runId = `run_slack_${Date.now()}`;
-    const responseThreadTs = event.thread_ts ?? event.ts;
     const enqueueResult = await this.deps.queue.enqueue({
       dedupeKey: `slack:${channel}:${event.ts ?? Date.now()}`,
       priority: "P0",
@@ -180,7 +214,6 @@ export class SlackSocketModeListener {
         title: "Slack codex mission",
         requestText: normalizedText,
         responseChannel: channel,
-        responseThreadTs,
         repoPath: this.deps.primaryRepoPath,
         cwd: this.deps.primaryRepoPath,
       },
