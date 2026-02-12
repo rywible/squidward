@@ -29,6 +29,7 @@ interface SlackEnvelope {
         bot_id?: string;
         user?: string;
         username?: string;
+        client_msg_id?: string;
         text?: string;
         channel?: string;
         ts?: string;
@@ -87,6 +88,8 @@ const isSlackSelfEvent = (event: {
 };
 
 const isDirectMessageChannel = (channel: string): boolean => channel.startsWith("D") || channel.startsWith("G");
+const isThreadReplyEvent = (threadTs?: string, ts?: string): boolean =>
+  typeof threadTs === "string" && typeof ts === "string" && threadTs.length > 0 && ts.length > 0 && threadTs !== ts;
 
 const parseSlackAllowedUsers = (value?: string): string[] => {
   if (!value) return [];
@@ -106,7 +109,7 @@ const isSelfMention = (text: string, selfUserId?: string): boolean => {
   return text.includes(`<@${selfUserId}>`);
 };
 
-const shouldHandleSlackMessage = (
+  const shouldHandleSlackMessage = (
   eventType: string,
   channel: string,
   normalizedText: string,
@@ -231,9 +234,25 @@ export class SlackSocketModeListener {
     const channel = event.channel ?? "";
     const text = event.text ?? "";
     const user = event.user;
+    const clientMsgId = event.client_msg_id;
+    const ts = event.ts;
+    const threadTs = event.thread_ts;
     const normalizedText = normalizeSlackText(text) || text.trim();
     if (!channel || !text.trim()) return;
     const allowedUserIds = this.deps.allowedUserIds ?? [];
+    const allowAllChannelMessages = this.deps.allowAllChannelMessages ?? false;
+
+    if (allowAllChannelMessages && allowedUserIds.length === 0) {
+      return;
+    }
+
+    if (isThreadReplyEvent(threadTs, ts)) {
+      return;
+    }
+
+    if (eventType === "message" && !clientMsgId) {
+      return;
+    }
     const authorizedBotUsers =
       envelope.authorizations
         ?.filter((authorization) => authorization?.is_bot === true)
@@ -279,7 +298,7 @@ export class SlackSocketModeListener {
         normalizedText,
         user,
         allowedUserIds,
-        this.deps.allowAllChannelMessages ?? false,
+        allowAllChannelMessages,
         this.deps.selfUserId
       )
     ) {
@@ -316,6 +335,7 @@ export const __testOnly = {
   isSlackSelfEvent,
   shouldHandleSlackMessage,
   isDirectMessageChannel,
+  isThreadReplyEvent,
   isSelfMention,
   parseSlackAllowedUsers,
   isAllowedSlackUser,

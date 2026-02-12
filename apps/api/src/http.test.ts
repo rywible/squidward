@@ -506,6 +506,7 @@ describe("api handler", () => {
       event: {
         type: "message",
         channel: "C123",
+        client_msg_id: "cli-1",
         ts: "1710000000.000100",
         text: "fb rq_abc12345 helpful super useful context",
       },
@@ -616,8 +617,58 @@ describe("api handler", () => {
         type: "message",
         channel: "C123",
         user: "UNBLOCKED",
+        client_msg_id: "cli-2",
         ts: "1710000000.000100",
         text: "please run your checks",
+      },
+    };
+
+    const body = JSON.stringify(eventBody);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = signSlackRequest(secret, ts, body);
+    const response = await handler(
+      new Request("http://localhost/slack/events", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-slack-request-timestamp": ts,
+          "x-slack-signature": sig,
+        },
+        body,
+      })
+    );
+    expect(response.status).toBe(202);
+
+    const queued = db.query(`SELECT COUNT(*) AS count FROM task_queue WHERE task_type='codex_mission'`).get() as {
+      count: number;
+    };
+    expect(Number(queued?.count ?? 0)).toBe(0);
+  });
+
+  test("ignores threaded Slack replies to avoid loop churn", async () => {
+    const dbPath = makeDbPath();
+    const secret = "slack-signing-secret";
+    const db = new Database(dbPath, { strict: false, create: true });
+    db.exec(readFileSync(join(import.meta.dir, "../../../packages/db/migrations/001_initial.sql"), "utf8"));
+    const handler = createHandler({
+      dbPath,
+      env: {
+        AGENT_DB_PATH: dbPath,
+        SLACK_SIGNING_SECRET: secret,
+        SLACK_TRIGGER_USER_IDS: "UOWNER",
+      },
+    });
+
+    const eventBody = {
+      type: "event_callback",
+      event: {
+        type: "message",
+        channel: "C123",
+        user: "UOWNER",
+        client_msg_id: "cli-3",
+        ts: "1710000000.000200",
+        thread_ts: "1710000000.000100",
+        text: "follow up in thread",
       },
     };
 

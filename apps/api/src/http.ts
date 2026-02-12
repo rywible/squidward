@@ -129,6 +129,8 @@ const normalizeSlackText = (text: string): string =>
     .trim();
 
 const isDirectMessageChannel = (channel: string): boolean => channel.startsWith("D") || channel.startsWith("G");
+const isThreadReplyEvent = (threadTs?: string, ts?: string): boolean =>
+  typeof threadTs === "string" && typeof ts === "string" && threadTs.length > 0 && ts.length > 0 && threadTs !== ts;
 
 const parseSlackAllowedUsers = (value?: string): string[] => {
   if (!value) return [];
@@ -271,7 +273,9 @@ export const createHandler = (options?: HandlerOptions) => {
     const channel = event?.channel ? String(event.channel) : "";
     const text = event?.text ? String(event.text) : "";
     const user = event?.user ? String(event.user) : undefined;
+    const clientMsgId = event?.client_msg_id ? String(event.client_msg_id) : undefined;
     const eventTs = event?.ts ? String(event.ts) : undefined;
+    const threadTs = event?.thread_ts ? String(event.thread_ts) : undefined;
     const normalizedText = normalizeSlackText(text) || text.trim();
     const selfUserId = env.SLACK_BOT_USER_ID?.trim();
     const allowAllChannelMessages = env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES === "1";
@@ -287,6 +291,18 @@ export const createHandler = (options?: HandlerOptions) => {
     if (event && channel && text.trim().length > 0) {
       const db = new Database(dbPath, { create: true, strict: false });
       const now = new Date().toISOString();
+      if (allowAllChannelMessages && allowedUserIds.length === 0) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
+      if (isThreadReplyEvent(threadTs, eventTs)) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
+      if (eventType === "message" && !clientMsgId) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
       if (!isAllowedSlackUser(user, allowedUserIds)) {
         db.close();
         return json({ ok: true, accepted: true }, 202);

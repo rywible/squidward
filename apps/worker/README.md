@@ -30,7 +30,7 @@ Adapters:
 - `SLACK_BOT_TOKEN`: required for `RealSlackAdapter` (`chat.postMessage`).
 - `SLACK_BOT_USER_ID`: optional manual bot/user id to block self-events when tokens don't expose profile.
 - `SLACK_APP_TOKEN`: required for Slack Socket Mode runtime listener.
-- `SLACK_ALLOW_ALL_CHANNEL_MESSAGES`: set `1` to process all `message` events (default `0`, mention+DM only).
+- `SLACK_ALLOW_ALL_CHANNEL_MESSAGES`: set `1` to process all `message` events (default `0`, mention+DM only). In this mode, set `SLACK_TRIGGER_USER_IDS` to avoid loop-prone broad triggering.
 - `SLACK_TRIGGER_USER_IDS`: optional comma-separated user IDs allowed to trigger Slack missions (empty means any user).
 - `BRAVE_API_KEY`: required for `RealBraveResearchAdapter` (`/res/v1/web/search`).
 - `OPENAI_API_KEY`: required for `RealOpenAIModelAdapter` (`/v1/responses`).
