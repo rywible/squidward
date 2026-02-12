@@ -32,6 +32,7 @@ const KEY_ORDER = [
   "WORKER_BOOTSTRAP_COMMAND",
   "CODEX_PREFLIGHT_AUTH_COMMAND",
   "CODEX_CLI_PATH",
+  "NODE_BIN_PATH",
   "PORTFOLIO_TOP_N",
   "PORTFOLIO_MIN_EV_AUTORUN",
   "TEST_GEN_MAX_CANDIDATES_PER_BUG",
@@ -246,6 +247,12 @@ const main = async (): Promise<void> => {
       "Codex CLI binary path",
       env.CODEX_CLI_PATH,
       "codex"
+    );
+    env.NODE_BIN_PATH = await prompt(
+      rl,
+      "Node binary or bin directory path for Codex",
+      env.NODE_BIN_PATH,
+      ""
     );
     env.PORTFOLIO_TOP_N = await prompt(rl, "Portfolio top-N candidates", env.PORTFOLIO_TOP_N, "5");
     env.PORTFOLIO_MIN_EV_AUTORUN = await prompt(

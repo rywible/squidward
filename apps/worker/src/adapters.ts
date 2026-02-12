@@ -1,3 +1,5 @@
+import { delimiter, dirname } from "node:path";
+
 interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -51,6 +53,33 @@ const defaultExecRunner: ExecRunner = async (command, args = [], options) => {
 const defaultFetch: FetchLike = (input, init) => fetch(input, init);
 
 const normalizeText = (value: string): string => value.trim();
+const buildRuntimeEnv = (baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  const pathParts = (env.PATH ?? "")
+    .split(delimiter)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const prependPath = (entry?: string): void => {
+    if (!entry) return;
+    if (!pathParts.includes(entry)) {
+      pathParts.unshift(entry);
+    }
+  };
+
+  const codexPath = env.CODEX_CLI_PATH?.trim();
+  if (codexPath && codexPath.includes("/")) {
+    prependPath(dirname(codexPath));
+  }
+
+  const nodeBinPath = env.NODE_BIN_PATH?.trim();
+  if (nodeBinPath) {
+    const normalized = nodeBinPath.endsWith("/node") ? dirname(nodeBinPath) : nodeBinPath;
+    prependPath(normalized);
+  }
+
+  env.PATH = pathParts.join(delimiter);
+  return env;
+};
 
 export const normalizeSlackMessageInput = (channel: string, text: string): { channel: string; text: string } => ({
   channel: normalizeText(channel),
@@ -255,14 +284,16 @@ export class StubCodexCliAdapter implements CodexCliAdapter {
 export class RealCodexCliAdapter implements CodexCliAdapter {
   private readonly execRunner: ExecRunner;
   private readonly codexBin: string;
+  private readonly runtimeEnv: NodeJS.ProcessEnv;
 
   constructor(deps?: { execRunner?: ExecRunner }) {
     this.execRunner = deps?.execRunner ?? defaultExecRunner;
     this.codexBin = process.env.CODEX_CLI_PATH?.trim() || "codex";
+    this.runtimeEnv = buildRuntimeEnv(process.env);
   }
 
   async runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }> {
-    const result = await this.execRunner("bash", ["-lc", command], { cwd, env: process.env });
+    const result = await this.execRunner("bash", ["-lc", command], { cwd, env: this.runtimeEnv });
 
     return {
       exitCode: result.exitCode,
@@ -271,7 +302,7 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
   }
 
   async preflightAvailability(): Promise<{ ok: boolean; details: string[] }> {
-    const result = await this.execRunner(this.codexBin, ["--version"]);
+    const result = await this.execRunner(this.codexBin, ["--version"], { env: this.runtimeEnv });
     return {
       ok: result.exitCode === 0,
       details: [result.stdout.trim(), result.stderr.trim()].filter((part) => part.length > 0),
@@ -286,7 +317,7 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
       };
     }
 
-    const result = await this.execRunner("bash", ["-lc", command]);
+    const result = await this.execRunner("bash", ["-lc", command], { env: this.runtimeEnv });
     return {
       ok: result.exitCode === 0,
       details: [result.stdout.trim(), result.stderr.trim()].filter((part) => part.length > 0),
