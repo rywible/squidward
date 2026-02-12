@@ -24,8 +24,8 @@ const buildCommandCandidates = (codexCmdQuoted: string, promptQuoted: string, pr
   }
 
   return [
-    `'${codexCmdQuoted}' exec --json --input-file '${promptFileQuoted}'`,
-    `'${codexCmdQuoted}' exec --input-file '${promptFileQuoted}'`,
+    `'${codexCmdQuoted}' exec --json '${promptQuoted}'`,
+    `'${codexCmdQuoted}' exec --json "$(cat '${promptFileQuoted}')"`,
     `'${codexCmdQuoted}' exec '${promptQuoted}'`,
     `printf '%s' '${promptQuoted}' | '${codexCmdQuoted}'`,
   ];
