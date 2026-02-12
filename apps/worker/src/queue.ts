@@ -89,6 +89,26 @@ export class SerializedTaskProcessor<T = unknown> {
     return next as QueueItem<T>;
   }
 
+  async claimNextWhere(predicate: (task: QueueItem<T>) => boolean): Promise<QueueItem<T> | null> {
+    const ready = await this.db.listReadyQueueItems(100, this.now());
+    if (ready.length === 0) {
+      return null;
+    }
+    ready.sort((a, b) => {
+      const priorityDelta = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
+    const selected = ready.find((task) => predicate(task as QueueItem<T>));
+    if (!selected) {
+      return null;
+    }
+    await this.db.updateQueueItemStatus(selected.id, "running", this.now());
+    return selected as QueueItem<T>;
+  }
+
   async finalize(taskId: string, success: boolean): Promise<void> {
     await this.db.updateQueueItemStatus(taskId, success ? "done" : "failed", this.now());
   }

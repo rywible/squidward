@@ -164,6 +164,7 @@ const ensureSeed = (db: Database): void => {
     { domain: "aps", soft: 40000, hard: 80000 },
     { domain: "memo", soft: 25000, hard: 45000 },
     { domain: "slack", soft: 20000, hard: 35000 },
+    { domain: "slack_chat", soft: 12000, hard: 22000 },
     { domain: "triage", soft: 30000, hard: 60000 },
   ];
   for (const budget of tokenBudgets) {

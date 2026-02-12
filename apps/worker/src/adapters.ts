@@ -25,7 +25,7 @@ export interface GithubGhAdapter {
 }
 
 export interface CodexCliAdapter {
-  runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }>;
+  runCommand(command: string, cwd: string, options?: { timeoutMs?: number }): Promise<{ exitCode: number; artifactRefs: string[] }>;
   preflightAvailability(): Promise<{ ok: boolean; details: string[] }>;
   preflightAuth(command?: string): Promise<{ ok: boolean; details: string[] }>;
 }
@@ -318,11 +318,15 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
     this.commandTimeoutMs = Math.max(5_000, Number(process.env.CODEX_COMMAND_TIMEOUT_MS ?? 120_000));
   }
 
-  async runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }> {
+  async runCommand(
+    command: string,
+    cwd: string,
+    options?: { timeoutMs?: number }
+  ): Promise<{ exitCode: number; artifactRefs: string[] }> {
     const result = await this.execRunner("bash", ["-c", command], {
       cwd,
       env: this.runtimeEnv,
-      timeoutMs: this.commandTimeoutMs,
+      timeoutMs: Math.max(5_000, options?.timeoutMs ?? this.commandTimeoutMs),
     });
 
     return {

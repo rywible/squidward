@@ -13,6 +13,7 @@
 - `TEST_GEN_MAX_CANDIDATES_PER_BUG` (optional): max generated test candidates per bug source. Default: `3`.
 - `MEMO_WEEKDAY` / `MEMO_HOUR` (optional): weekly memo schedule. Default: Monday at 09:00.
 - `GRAPH_REINDEX_CRON` (optional): graph index interval in minutes. Default: `60`.
+- `CI_AUTOPILOT_ENABLED` (optional): enable periodic GitHub Actions failed-run detection and follow-up mission queueing. Default: `1`.
 - `PERF_SCIENTIST_ENABLED` (optional): enable APS job pipeline (`1`/`0`). Default: `0`.
 - `PERF_SCIENTIST_REPO_PATH` (optional): managed repo path for perf scientist.
 - `PERF_SCIENTIST_BENCHMARK_ROOT` (optional): benchmark project root for `wrela perf/perfcmp`.
@@ -32,6 +33,13 @@ Adapters:
 - `SLACK_APP_TOKEN`: required for Slack Socket Mode runtime listener.
 - `SLACK_ALLOW_ALL_CHANNEL_MESSAGES`: set `1` to process all `message` events (default `0`, mention+DM only). In this mode, set `SLACK_TRIGGER_USER_IDS` to avoid loop-prone broad triggering.
 - `SLACK_TRIGGER_USER_IDS`: optional comma-separated user IDs allowed to trigger Slack missions (empty means any user).
+
+Owner control commands in Slack:
+- `control pause` / `control resume`
+- `control stop <runId>`
+- `control replace <runId> <new objective>`
+- `control approve <runId> [notes]` / `control deny <runId> [notes]`
+- `control why <runId>`
 - `BRAVE_API_KEY`: required for `RealBraveResearchAdapter` (`/res/v1/web/search`).
 - `OPENAI_API_KEY`: required for `RealOpenAIModelAdapter` (`/v1/responses`).
 - `OPENAI_MODEL` (optional): model name for OpenAI adapter. Default: `gpt-4.1-mini`.

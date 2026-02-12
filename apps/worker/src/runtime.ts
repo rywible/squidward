@@ -41,6 +41,11 @@ const toSlackUserReply = (summary: string): string => {
   return reply.length > 1200 ? `${reply.slice(0, 1197)}...` : reply;
 };
 
+const isCodexContractFailure = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /invalid_json_payload|codex_command_failed|invalid_status|missing_summary/i.test(message);
+};
+
 const quickSlackReply = (requestText?: string): string | null => {
   const text = requestText?.trim().toLowerCase() ?? "";
   if (!text) return null;
@@ -60,8 +65,66 @@ const quickSlackReply = (requestText?: string): string | null => {
   return null;
 };
 
+const isLikelyHeavyRequestText = (text?: string): boolean => {
+  const normalized = (text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.length > 220) return true;
+  if (normalized.includes("```") || normalized.includes("`")) return true;
+  if (/(fix|implement|build|refactor|optimize|benchmark|run tests?|open pr|create pr|review|debug|investigate|deploy|rollback)\b/.test(normalized)) {
+    return true;
+  }
+  if (/(\/users\/|~\/projects\/|\.ts\b|\.tsx\b|\.rs\b|\.sql\b|\.json\b|error:|stack:)/.test(normalized)) {
+    return true;
+  }
+  return false;
+};
+
+interface SlackLatencyStats {
+  sampleSize: number;
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+  errorRate: number;
+}
+
+const computeAdaptiveRetrievalBudget = (
+  baseBudget: number,
+  domain: string,
+  stats?: SlackLatencyStats | null
+): number => {
+  const avgLatency = Number(stats?.avgLatencyMs ?? 0);
+  const p95Latency = Number(stats?.p95LatencyMs ?? 0);
+  const errorRate = Number(stats?.errorRate ?? 0);
+  const minBudget = domain === "slack_chat" ? 300 : 700;
+  if (p95Latency > 12000 || errorRate > 0.2) return Math.max(minBudget, Math.floor(baseBudget * 0.55));
+  if (avgLatency > 7000 || p95Latency > 9000) return Math.max(minBudget, Math.floor(baseBudget * 0.65));
+  if (avgLatency > 4000 || p95Latency > 6500) return Math.max(minBudget, Math.floor(baseBudget * 0.8));
+  if (avgLatency > 0 && avgLatency < 1800 && p95Latency < 3500 && errorRate < 0.08) {
+    return Math.min(baseBudget, Math.floor(baseBudget * 1.1));
+  }
+  return baseBudget;
+};
+
+const computeAdaptiveCodexTimeoutMs = (
+  baseTimeoutMs: number,
+  kind: "chat" | "mission",
+  stats?: SlackLatencyStats | null
+): number => {
+  const avgLatency = Number(stats?.avgLatencyMs ?? 0);
+  const p95Latency = Number(stats?.p95LatencyMs ?? 0);
+  const errorRate = Number(stats?.errorRate ?? 0);
+  const min = kind === "chat" ? 15_000 : 25_000;
+  const max = kind === "chat" ? 120_000 : 180_000;
+  if (p95Latency > 12_000 || errorRate > 0.2) return Math.max(min, Math.floor(baseTimeoutMs * 0.72));
+  if (avgLatency > 7000 || p95Latency > 9000) return Math.max(min, Math.floor(baseTimeoutMs * 0.82));
+  if (avgLatency > 0 && avgLatency < 2000 && p95Latency < 3500 && errorRate < 0.08) {
+    return Math.min(max, Math.floor(baseTimeoutMs * 1.12));
+  }
+  return Math.max(min, Math.min(max, baseTimeoutMs));
+};
+
 export type WorkerTaskType =
   | "maintenance"
+  | "owner_control"
   | "slack_chat_reply"
   | "codex_mission"
   | "portfolio_eval"
@@ -73,7 +136,11 @@ export type WorkerTaskType =
   | "perf_generate_candidates"
   | "perf_run_candidate"
   | "perf_score_decide"
-  | "perf_open_draft_pr";
+  | "perf_open_draft_pr"
+  | "replay_eval_nightly"
+  | "ci_red_autopilot"
+  | "memory_contradiction_scan"
+  | "latency_governor";
 
 export interface WorkerTaskPayload {
   taskType?: WorkerTaskType;
@@ -91,6 +158,9 @@ export interface WorkerTaskPayload {
   candidateId?: string;
   profile?: "smoke" | "standard" | "deep";
   triggerSource?: string;
+  controlAction?: "approve" | "deny" | "why" | "stop" | "pause" | "resume" | "replace";
+  controlTarget?: string;
+  controlText?: string;
 }
 
 export interface WorkerRuntimeDeps {
@@ -117,7 +187,11 @@ export interface WorkerRuntimeDeps {
     retrievalBudgetTokens?: number;
     maxTasksPerHeartbeat?: number;
     maxCodexSessions?: number;
+    slackReservedSlots?: number;
+    slackChatTimeoutMs?: number;
+    slackMissionTimeoutMs?: number;
     codexWorktreesEnabled?: boolean;
+    ciAutopilotEnabled?: boolean;
     perfScientist?: Partial<PerfScientistConfig>;
   };
   now?: () => Date;
@@ -136,14 +210,30 @@ export class WorkerRuntime {
   private readonly wrelaLearning: WrelaLearningService | null;
   private readonly worktrees: WorktreeManager | null;
   private readonly slack: SlackAdapter | null;
-  private readonly sqliteDb: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } | null;
+  private readonly sqliteDb:
+    | {
+        query: (sql: string) => {
+          run: (...args: unknown[]) => unknown;
+          get: (...args: unknown[]) => unknown;
+          all: (...args: unknown[]) => unknown;
+        };
+      }
+    | null;
   private readonly config: Required<NonNullable<WorkerRuntimeDeps["config"]>>;
   private readonly now: () => Date;
+  private slackStatsCache: { expiresAtMs: number; value: SlackLatencyStats | null } = {
+    expiresAtMs: 0,
+    value: null,
+  };
   private lastPortfolioAt = 0;
   private lastTestEvolutionAt = 0;
   private lastMemoAt = 0;
   private lastGraphAt = 0;
   private lastPerfBaselineAt = 0;
+  private lastReplayEvalAt = 0;
+  private lastCiAutopilotAt = 0;
+  private lastMemoryScanAt = 0;
+  private lastLatencyGovernorAt = 0;
 
   private mode: SchedulerMode = "idle";
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -164,7 +254,16 @@ export class WorkerRuntime {
     this.wrelaLearning = deps.wrelaLearning ?? null;
     this.worktrees = deps.worktrees ?? null;
     this.slack = deps.slack ?? null;
-    this.sqliteDb = (this.db as { db?: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db ?? null;
+    this.sqliteDb =
+      (this.db as {
+        db?: {
+          query: (sql: string) => {
+            run: (...args: unknown[]) => unknown;
+            get: (...args: unknown[]) => unknown;
+            all: (...args: unknown[]) => unknown;
+          };
+        };
+      }).db ?? null;
     this.config = {
       portfolioTopN: deps.config?.portfolioTopN ?? 5,
       portfolioMinEvAutorun: deps.config?.portfolioMinEvAutorun ?? 1.25,
@@ -176,7 +275,11 @@ export class WorkerRuntime {
       retrievalBudgetTokens: Math.max(512, Math.min(16000, deps.config?.retrievalBudgetTokens ?? 4000)),
       maxTasksPerHeartbeat: Math.max(1, Math.min(50, deps.config?.maxTasksPerHeartbeat ?? 8)),
       maxCodexSessions: Math.max(1, Math.min(16, deps.config?.maxCodexSessions ?? 4)),
+      slackReservedSlots: Math.max(0, Math.min(8, deps.config?.slackReservedSlots ?? 2)),
+      slackChatTimeoutMs: Math.max(10_000, Math.min(180_000, deps.config?.slackChatTimeoutMs ?? 45_000)),
+      slackMissionTimeoutMs: Math.max(15_000, Math.min(240_000, deps.config?.slackMissionTimeoutMs ?? 90_000)),
       codexWorktreesEnabled: deps.config?.codexWorktreesEnabled ?? true,
+      ciAutopilotEnabled: deps.config?.ciAutopilotEnabled ?? true,
       perfScientist: {
         enabled: deps.config?.perfScientist?.enabled ?? false,
         nightlyHour: deps.config?.perfScientist?.nightlyHour ?? 2,
@@ -234,7 +337,30 @@ export class WorkerRuntime {
           const availableSlots = Math.max(0, Math.min(this.config.maxTasksPerHeartbeat, this.sessions.getAvailableSlots()));
           const work: Array<Promise<void>> = [];
           for (let i = 0; i < availableSlots; i += 1) {
-            const claimed = await this.queue.claimNext();
+            const modeNow = await this.db.getWorkerMode();
+            if (modeNow === "paused") {
+              break;
+            }
+            let claimed =
+              i < this.config.slackReservedSlots
+                ? await this.queue.claimNextWhere((candidate) => {
+                    const payload =
+                      candidate.payload && typeof candidate.payload === "object"
+                        ? (candidate.payload as WorkerTaskPayload)
+                        : null;
+                    const type = payload?.taskType ?? "maintenance";
+                    return (
+                      type === "slack_chat_reply" ||
+                      (type === "codex_mission" &&
+                        payload?.domain === "slack" &&
+                        typeof payload?.responseChannel === "string" &&
+                        payload.responseChannel.length > 0)
+                    );
+                  })
+                : null;
+            if (!claimed) {
+              claimed = await this.queue.claimNext();
+            }
             if (!claimed) {
               break;
             }
@@ -317,6 +443,80 @@ export class WorkerRuntime {
     }, waitMs);
   }
 
+  private getSlackLatencyStats(): SlackLatencyStats | null {
+    if (!this.sqliteDb) return null;
+    const nowMs = this.now().getTime();
+    if (nowMs < this.slackStatsCache.expiresAtMs) {
+      return this.slackStatsCache.value;
+    }
+
+    const aggregate = this.sqliteDb
+      .query(
+        `SELECT
+           COUNT(*) AS total,
+           AVG(COALESCE(response_latency, 0)) AS avg_latency,
+           AVG(
+             CASE
+               WHEN action_taken IN ('error_reply','codex_contract_fallback','codex_runtime_fallback') THEN 1
+               ELSE 0
+             END
+           ) AS error_rate
+         FROM interaction_events
+         WHERE channel='slack'
+           AND message_type IN ('slack_chat_reply','codex_mission')
+           AND created_at >= datetime('now', '-6 hours')`
+      )
+      .get() as Record<string, unknown> | null;
+
+    const total = Number(aggregate?.total ?? 0);
+    if (!Number.isFinite(total) || total <= 0) {
+      this.slackStatsCache = { expiresAtMs: nowMs + 60_000, value: null };
+      return null;
+    }
+
+    const latencyCountRow = this.sqliteDb
+      .query(
+        `SELECT COUNT(*) AS count
+         FROM interaction_events
+         WHERE channel='slack'
+           AND message_type IN ('slack_chat_reply','codex_mission')
+           AND response_latency IS NOT NULL
+           AND created_at >= datetime('now', '-6 hours')`
+      )
+      .get() as Record<string, unknown> | null;
+    const latencyCount = Number(latencyCountRow?.count ?? 0);
+
+    let p95 = Number(aggregate?.avg_latency ?? 0);
+    if (latencyCount > 0) {
+      const p95Offset = Math.max(0, Math.min(latencyCount - 1, Math.floor((latencyCount - 1) * 0.95)));
+      const p95Row = this.sqliteDb
+        .query(
+          `SELECT response_latency
+           FROM interaction_events
+           WHERE channel='slack'
+             AND message_type IN ('slack_chat_reply','codex_mission')
+             AND response_latency IS NOT NULL
+             AND created_at >= datetime('now', '-6 hours')
+           ORDER BY response_latency ASC
+           LIMIT 1 OFFSET ?`
+        )
+        .get(p95Offset) as Record<string, unknown> | null;
+      p95 = Number(p95Row?.response_latency ?? p95);
+    }
+
+    const stats: SlackLatencyStats = {
+      sampleSize: total,
+      avgLatencyMs: Number(aggregate?.avg_latency ?? 0),
+      p95LatencyMs: Number.isFinite(p95) ? p95 : Number(aggregate?.avg_latency ?? 0),
+      errorRate: Number(aggregate?.error_rate ?? 0),
+    };
+    this.slackStatsCache = {
+      expiresAtMs: nowMs + 60_000,
+      value: stats,
+    };
+    return stats;
+  }
+
   private async executeTask(task: WorkerTaskPayload): Promise<void> {
     if (!task || typeof task !== "object") {
       task = {
@@ -336,36 +536,253 @@ export class WorkerRuntime {
 
     const startedAt = this.now();
     try {
-      if (taskType === "slack_chat_reply") {
+      if (taskType === "owner_control") {
+        const action = task.controlAction;
+        const target = task.controlTarget?.trim();
+        const nowIso = this.now().toISOString();
+        let ack = "Command processed.";
+        if (!this.sqliteDb) {
+          ack = "Control command unavailable: DB not initialized.";
+        } else if (!action) {
+          ack = "Missing control action.";
+        } else if (action === "pause") {
+          this.sqliteDb
+            .query(
+              `INSERT INTO worker_state (worker_id, state, heartbeat_at, metadata_json, updated_at)
+               VALUES ('global', 'paused', ?, '{}', ?)
+               ON CONFLICT(worker_id) DO UPDATE SET state='paused', heartbeat_at=excluded.heartbeat_at, updated_at=excluded.updated_at`
+            )
+            .run(nowIso, nowIso);
+          ack = "Paused worker scheduling.";
+        } else if (action === "resume") {
+          this.sqliteDb
+            .query(
+              `INSERT INTO worker_state (worker_id, state, heartbeat_at, metadata_json, updated_at)
+               VALUES ('global', 'active', ?, '{}', ?)
+               ON CONFLICT(worker_id) DO UPDATE SET state='active', heartbeat_at=excluded.heartbeat_at, updated_at=excluded.updated_at`
+            )
+            .run(nowIso, nowIso);
+          ack = "Resumed worker scheduling.";
+        } else if (action === "stop") {
+          if (!target) {
+            ack = "Stop requires a run id.";
+          } else {
+            this.sqliteDb
+              .query(
+                `UPDATE task_queue
+                 SET status='failed', last_error='interrupted_by_owner', updated_at=?
+                 WHERE status IN ('queued','running')
+                   AND (source_id=? OR json_extract(payload_json, '$.payload.runId')=?)`
+              )
+              .run(nowIso, target, target);
+            this.sqliteDb
+              .query(`UPDATE agent_runs SET outcome='cancelled' WHERE id=?`)
+              .run(target);
+            ack = `Stopped queued/running tasks for ${target}.`;
+          }
+        } else if (action === "replace") {
+          if (!target || !(task.controlText ?? "").trim()) {
+            ack = "Replace requires: replace <runId> <new objective>.";
+          } else {
+            this.sqliteDb
+              .query(
+                `UPDATE task_queue
+                 SET status='failed', last_error='replaced_by_owner', updated_at=?
+                 WHERE status IN ('queued','running')
+                   AND (source_id=? OR json_extract(payload_json, '$.payload.runId')=?)`
+              )
+              .run(nowIso, target, target);
+            await this.queue.enqueue({
+              dedupeKey: `owner_replace:${Date.now()}`,
+              priority: "P0",
+              payload: {
+                taskType: "codex_mission",
+                runId: `run_replace_${Date.now()}`,
+                domain: "slack",
+                objective: task.controlText?.trim() ?? "Owner replacement mission",
+                requestText: task.controlText?.trim() ?? "",
+                responseChannel: task.responseChannel,
+                repoPath: this.config.primaryRepoPath,
+                cwd: this.config.primaryRepoPath,
+                title: "Owner replacement mission",
+              },
+            });
+            ack = `Replaced ${target} with new mission.`;
+          }
+        } else if (action === "why") {
+          if (!target) {
+            ack = "Why requires a run id.";
+          } else {
+            const run = this.sqliteDb
+              .query(
+                `SELECT objective, outcome, created_at
+                 FROM agent_runs
+                 WHERE id=?
+                 LIMIT 1`
+              )
+              .get(target) as Record<string, unknown> | null;
+            const audits = this.sqliteDb
+              .query(
+                `SELECT command, exit_code, artifact_refs
+                 FROM command_audit
+                 WHERE run_id=?
+                 ORDER BY started_at DESC
+                 LIMIT 2`
+              )
+              .all(target) as Array<Record<string, unknown>>;
+            if (!run) {
+              ack = `No run found: ${target}`;
+            } else {
+              const highlights = audits
+                .map((row) => {
+                  const cmd = String(row.command ?? "").slice(0, 80);
+                  const code = Number(row.exit_code ?? -1);
+                  return `${cmd} [exit=${code}]`;
+                })
+                .join(" | ");
+              ack = `Run ${target}: ${String(run.outcome)}. Objective: ${String(run.objective)}.${highlights ? ` Recent: ${highlights}` : ""}`;
+            }
+          }
+        } else if (action === "approve" || action === "deny") {
+          if (!target) {
+            ack = `${action} requires a run id.`;
+          } else {
+            this.sqliteDb
+              .query(
+                `INSERT INTO owner_feedback_events
+                 (id, channel, feedback_type, label, notes, run_id, created_at)
+                 VALUES (?, 'slack', ?, ?, ?, ?, ?)`
+              )
+              .run(
+                crypto.randomUUID(),
+                action === "approve" ? "owner_approve" : "owner_deny",
+                target,
+                task.controlText ?? null,
+                target,
+                nowIso
+              );
+            const decision = this.sqliteDb
+              .query(
+                `SELECT pd.id
+                 FROM memory_episodes me
+                 JOIN policy_decisions pd
+                   ON pd.domain = json_extract(me.context_json, '$.domain')
+                  AND pd.context_hash = json_extract(me.context_json, '$.contextHash')
+                 WHERE me.run_id=?
+                 ORDER BY pd.created_at DESC
+                 LIMIT 1`
+              )
+              .get(target) as Record<string, unknown> | null;
+            if (decision?.id) {
+              const ownerSignal = action === "approve" ? 1 : -1;
+              this.sqliteDb
+                .query(
+                  `INSERT INTO policy_rewards
+                   (id, policy_decision_id, reward_total, reward_components_json, latency_minutes, created_at)
+                   VALUES (?, ?, ?, ?, 0, ?)`
+                )
+                .run(
+                  crypto.randomUUID(),
+                  String(decision.id),
+                  ownerSignal,
+                  JSON.stringify({
+                    reliability: 0,
+                    completion: 0,
+                    perfGain: 0,
+                    ownerFeedback: ownerSignal,
+                    noisePenalty: 0,
+                  }),
+                  nowIso
+                );
+            }
+            ack = action === "approve" ? `Approved ${target}.` : `Denied ${target}.`;
+          }
+        }
+        if (this.slack && task.responseChannel) {
+          await this.slack.postMessage(task.responseChannel, ack);
+        }
+      } else if (taskType === "slack_chat_reply") {
         const instant = quickSlackReply(task.requestText);
         if (this.slack && task.responseChannel && instant) {
           await this.slack.postMessage(task.responseChannel, instant);
+          if (this.sqliteDb) {
+            this.sqliteDb
+              .query(
+                `INSERT INTO interaction_events
+                 (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                 VALUES (?, 'slack', 'slack_chat_reply', ?, 'fast_path_reply', NULL, ?)`
+              )
+              .run(crypto.randomUUID(), Math.max(0, this.now().getTime() - startedAt.getTime()), this.now().toISOString());
+          }
         } else if (this.slack && task.responseChannel && this.codexHarness) {
-          const objective = task.objective ?? task.title ?? "Respond to Slack user message";
-          const domain = "slack_chat";
-          const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
-          const missionPack = buildMissionPack({
-            db: this.sqliteDb as never,
-            task: {
-              ...task,
-              taskType: "slack_chat_reply",
-            },
-            repoPath: task.repoPath ?? this.config.primaryRepoPath,
-            objective,
-            tokenEnvelope,
-            retrievalBudgetTokens: Math.min(900, this.config.retrievalBudgetTokens),
-          });
-          const parsed = await this.codexHarness.run({
-            missionPack,
-            objectiveDetails:
-              task.requestText ??
-              "Respond directly in Slack. Keep concise. Do not describe internal steps unless asked.",
-            cwd: task.cwd ?? this.config.primaryRepoPath,
-            model: task.model,
-          });
-          await this.slack.postMessage(task.responseChannel, toSlackUserReply(parsed.payload.summary));
+          try {
+            const objective = task.objective ?? task.title ?? "Respond to Slack user message";
+            const domain = "slack_chat";
+            const slackStats = this.getSlackLatencyStats();
+            const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
+            const missionPack = buildMissionPack({
+              db: this.sqliteDb as never,
+              task: {
+                ...task,
+                taskType: "slack_chat_reply",
+              },
+              repoPath: task.repoPath ?? this.config.primaryRepoPath,
+              objective,
+              tokenEnvelope,
+              retrievalBudgetTokens: computeAdaptiveRetrievalBudget(
+                Math.min(900, this.config.retrievalBudgetTokens),
+                "slack_chat",
+                slackStats
+              ),
+            });
+            const parsed = await this.codexHarness.run({
+              missionPack,
+              objectiveDetails:
+                task.requestText ??
+                "Respond directly in Slack. Keep concise. Do not describe internal steps unless asked.",
+              cwd: task.cwd ?? this.config.primaryRepoPath,
+              model: task.model,
+              timeoutMs: computeAdaptiveCodexTimeoutMs(this.config.slackChatTimeoutMs, "chat", slackStats),
+            });
+            await this.slack.postMessage(task.responseChannel, toSlackUserReply(parsed.payload.summary));
+            if (this.sqliteDb) {
+              this.sqliteDb
+                .query(
+                  `INSERT INTO interaction_events
+                   (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                   VALUES (?, 'slack', 'slack_chat_reply', ?, 'codex_chat_reply', NULL, ?)`
+                )
+                .run(crypto.randomUUID(), Math.max(0, this.now().getTime() - startedAt.getTime()), this.now().toISOString());
+            }
+          } catch (error) {
+            console.error("[worker] slack chat codex path failed:", error);
+            await this.slack.postMessage(task.responseChannel, "I hit a response formatting issue. Please resend in one line and I’ll retry.");
+            if (this.sqliteDb) {
+              this.sqliteDb
+                .query(
+                  `INSERT INTO interaction_events
+                   (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                   VALUES (?, 'slack', 'slack_chat_reply', ?, ?, NULL, ?)`
+                )
+                .run(
+                  crypto.randomUUID(),
+                  Math.max(0, this.now().getTime() - startedAt.getTime()),
+                  isCodexContractFailure(error) ? "codex_contract_fallback" : "codex_runtime_fallback",
+                  this.now().toISOString()
+                );
+            }
+          }
         } else if (this.slack && task.responseChannel) {
           await this.slack.postMessage(task.responseChannel, "I’m here. What do you need?");
+          if (this.sqliteDb) {
+            this.sqliteDb
+              .query(
+                `INSERT INTO interaction_events
+                 (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                 VALUES (?, 'slack', 'slack_chat_reply', ?, 'fallback_chat_reply', NULL, ?)`
+              )
+              .run(crypto.randomUUID(), Math.max(0, this.now().getTime() - startedAt.getTime()), this.now().toISOString());
+          }
         }
       } else if (taskType === "codex_mission") {
         if (this.slack && task.responseChannel && task.domain === "slack") {
@@ -398,6 +815,7 @@ export class WorkerRuntime {
         }
         try {
         const domain = task.domain ?? "general";
+        const slackStats = domain === "slack" ? this.getSlackLatencyStats() : null;
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
         const objective = task.objective ?? task.title ?? "Execute codex mission";
         const missionPack = buildMissionPack({
@@ -406,13 +824,21 @@ export class WorkerRuntime {
           repoPath: canonicalRepoPath,
           objective,
           tokenEnvelope,
-          retrievalBudgetTokens: this.config.retrievalBudgetTokens,
+          retrievalBudgetTokens: computeAdaptiveRetrievalBudget(
+            this.config.retrievalBudgetTokens,
+            domain,
+            slackStats
+          ),
         });
         const parsed = await this.codexHarness.run({
           missionPack,
           objectiveDetails: task.requestText ?? task.command ?? objective,
           cwd: executionCwd,
           model: task.model,
+          timeoutMs:
+            task.domain === "slack"
+              ? computeAdaptiveCodexTimeoutMs(this.config.slackMissionTimeoutMs, "mission", slackStats)
+              : undefined,
         });
         const memoryResult = this.memoryGovernor.commit(task.runId, parsed.payload.memoryProposals, "codex_harness");
         if (this.sqliteDb) {
@@ -489,8 +915,44 @@ export class WorkerRuntime {
             `[worker] slack mission reply runId=${task.runId} status=${parsed.payload.status} queryId=${missionPack.context.retrieval.queryId} tokens=${missionPack.context.retrieval.usedTokens}/${missionPack.context.retrieval.budgetTokens}`
           );
           await this.slack.postMessage(task.responseChannel, reply);
+          if (this.sqliteDb) {
+            this.sqliteDb
+              .query(
+                `INSERT INTO interaction_events
+                 (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                 VALUES (?, 'slack', 'codex_mission', ?, ?, NULL, ?)`
+              )
+              .run(
+                crypto.randomUUID(),
+                Math.max(0, this.now().getTime() - startedAt.getTime()),
+                parsed.payload.status,
+                this.now().toISOString()
+              );
+          }
         }
         missionSucceeded = true;
+        } catch (error) {
+          if (this.slack && task.responseChannel) {
+            const fallback = isCodexContractFailure(error)
+              ? "I hit a formatting issue while preparing that. Please resend your request in one line and I’ll retry."
+              : `I hit an execution error on that run (${task.runId}). Please retry in a moment.`;
+            await this.slack.postMessage(task.responseChannel, fallback);
+            if (this.sqliteDb) {
+              this.sqliteDb
+                .query(
+                  `INSERT INTO interaction_events
+                   (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                   VALUES (?, 'slack', 'codex_mission', ?, ?, NULL, ?)`
+                )
+                .run(
+                  crypto.randomUUID(),
+                  Math.max(0, this.now().getTime() - startedAt.getTime()),
+                  isCodexContractFailure(error) ? "codex_contract_fallback" : "codex_runtime_fallback",
+                  this.now().toISOString()
+                );
+            }
+          }
+          throw error;
         } finally {
           if (lease) {
             try {
@@ -639,6 +1101,221 @@ export class WorkerRuntime {
           throw new Error("missing_candidate_id");
         }
         await this.perfScientist.openDraftPr({ candidateId: task.candidateId, runId: task.runId });
+      } else if (taskType === "replay_eval_nightly") {
+        if (this.sqliteDb) {
+          const sample = this.sqliteDb
+            .query(
+              `SELECT COUNT(*) AS total
+               FROM task_queue
+               WHERE source_id LIKE 'run_slack_%'
+                 AND task_type IN ('slack_chat_reply', 'codex_mission')
+                 AND created_at >= datetime('now', '-7 day')`
+            )
+            .get() as Record<string, unknown>;
+          const latency = this.sqliteDb
+            .query(
+              `SELECT AVG(COALESCE(response_latency, 0)) AS avg_latency
+               FROM interaction_events
+               WHERE channel='slack'
+                 AND created_at >= datetime('now', '-7 day')`
+            )
+            .get() as Record<string, unknown>;
+          const laneRows = this.sqliteDb
+            .query(
+              `SELECT task_type, payload_json
+               FROM task_queue
+               WHERE source_id LIKE 'run_slack_%'
+                 AND task_type IN ('slack_chat_reply', 'codex_mission')
+                 AND created_at >= datetime('now', '-7 day')
+               LIMIT 500`
+            )
+            .all() as Array<Record<string, unknown>>;
+          let matched = 0;
+          for (const row of laneRows) {
+            const lane = String(row.task_type ?? "");
+            let requestText = "";
+            try {
+              const payload = JSON.parse(String(row.payload_json ?? "{}")) as {
+                payload?: { requestText?: string };
+              };
+              requestText = payload.payload?.requestText ?? "";
+            } catch {
+              requestText = "";
+            }
+            const likelyHeavy = isLikelyHeavyRequestText(requestText);
+            if ((lane === "slack_chat_reply" && !likelyHeavy) || (lane === "codex_mission" && likelyHeavy)) {
+              matched += 1;
+            }
+          }
+          const laneAccuracy = laneRows.length > 0 ? matched / laneRows.length : 1;
+          this.sqliteDb
+            .query(
+              `INSERT INTO replay_eval_runs
+               (id, sample_size, avg_latency_ms, lane_accuracy, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`
+            )
+            .run(
+              task.runId,
+              Number(sample.total ?? 0),
+              Number(latency.avg_latency ?? 0),
+              laneAccuracy,
+              "nightly replay eval v1",
+              this.now().toISOString()
+            );
+        }
+      } else if (taskType === "ci_red_autopilot") {
+        if (this.config.ciAutopilotEnabled) {
+          const cmd = "gh run list --limit 1 --json conclusion,status,headSha,url,name,workflowName";
+          const ci = await this.audit.runWithAudit(task.runId, cmd, this.config.primaryRepoPath);
+          const raw = ci.artifactRefs.find((item) => item.trim().startsWith("[")) ?? "[]";
+          let parsed: Array<Record<string, unknown>> = [];
+          try {
+            parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+          } catch {
+            parsed = [];
+          }
+          const latest = parsed[0];
+          const isFailed =
+            latest &&
+            String(latest.status ?? "").toLowerCase() === "completed" &&
+            String(latest.conclusion ?? "").toLowerCase() === "failure";
+          const headSha = String(latest?.headSha ?? "");
+          const now = this.now().toISOString();
+          let alreadyQueuedForHead = false;
+          if (this.sqliteDb && headSha) {
+            const existing = this.sqliteDb
+              .query(
+                `SELECT last_enqueued_at
+                 FROM ci_red_autopilot_heads
+                 WHERE head_sha=?
+                 LIMIT 1`
+              )
+              .get(headSha) as Record<string, unknown> | null;
+            if (isFailed && existing?.last_enqueued_at) {
+              alreadyQueuedForHead = true;
+            }
+          }
+          if (isFailed && !alreadyQueuedForHead) {
+            await this.queue.enqueue({
+              dedupeKey: `ci_red_autopilot:${headSha || Date.now()}`,
+              priority: "P1",
+              payload: {
+                taskType: "codex_mission",
+                runId: `run_ci_autopilot_${Date.now()}`,
+                domain: "triage",
+                objective: "Investigate latest failed CI run and propose or draft a fix",
+                requestText: `Latest failed CI run: ${JSON.stringify(latest)}. Produce fix plan and code changes.`,
+                repoPath: this.config.primaryRepoPath,
+                cwd: this.config.primaryRepoPath,
+                title: "CI red autopilot mission",
+              },
+            });
+            if (this.sqliteDb && headSha) {
+              this.sqliteDb
+                .query(
+                  `INSERT INTO ci_red_autopilot_heads
+                   (head_sha, first_seen_at, last_seen_at, last_enqueued_at, last_state, last_run_url)
+                   VALUES (?, ?, ?, ?, 'failure', ?)
+                   ON CONFLICT(head_sha) DO UPDATE SET
+                     last_seen_at=excluded.last_seen_at,
+                     last_enqueued_at=excluded.last_enqueued_at,
+                     last_state=excluded.last_state,
+                     last_run_url=excluded.last_run_url`
+                )
+                .run(headSha, now, now, now, String(latest?.url ?? ""));
+            }
+          } else if (this.sqliteDb && headSha) {
+            this.sqliteDb
+              .query(
+                `INSERT INTO ci_red_autopilot_heads
+                 (head_sha, first_seen_at, last_seen_at, last_enqueued_at, last_state, last_run_url)
+                 VALUES (?, ?, ?, NULL, 'ok', ?)
+                 ON CONFLICT(head_sha) DO UPDATE SET
+                   last_seen_at=excluded.last_seen_at,
+                   last_state=excluded.last_state,
+                   last_run_url=excluded.last_run_url`
+              )
+              .run(headSha, now, now, String(latest?.url ?? ""));
+          }
+        }
+      } else if (taskType === "memory_contradiction_scan") {
+        if (this.sqliteDb) {
+          const rows = this.sqliteDb
+            .query(
+              `SELECT mf.fact_key AS fact_key,
+                      mf.fact_value_json AS canonical_value_json,
+                      rlf.fact_value_json AS repo_value_json
+               FROM memory_facts mf
+               JOIN repo_learning_facts rlf ON rlf.fact_key = mf.fact_key
+               WHERE mf.namespace='canonical'
+                 AND mf.state IN ('active', 'proposed')
+                 AND mf.fact_value_json <> rlf.fact_value_json
+               LIMIT 50`
+            )
+            .all() as Array<Record<string, unknown>>;
+          for (const row of rows) {
+            const factKey = String(row.fact_key ?? "");
+            const existing = this.sqliteDb
+              .query(
+                `SELECT id FROM memory_contradictions
+                 WHERE fact_key=? AND status='open'
+                 LIMIT 1`
+              )
+              .get(factKey) as Record<string, unknown> | null;
+            if (existing) continue;
+            this.sqliteDb
+              .query(
+                `INSERT INTO memory_contradictions
+                 (id, fact_key, canonical_value_json, repo_value_json, status, created_at)
+                 VALUES (?, ?, ?, ?, 'open', ?)`
+              )
+              .run(
+                crypto.randomUUID(),
+                factKey,
+                String(row.canonical_value_json ?? "{}"),
+                String(row.repo_value_json ?? "{}"),
+                this.now().toISOString()
+              );
+          }
+        }
+      } else if (taskType === "latency_governor") {
+        if (this.sqliteDb) {
+          const row = this.sqliteDb
+            .query(
+              `SELECT AVG(COALESCE(response_latency, 0)) AS avg_latency
+               FROM interaction_events
+               WHERE channel='slack'
+                 AND created_at >= datetime('now', '-1 day')`
+            )
+            .get() as Record<string, unknown>;
+          const avgLatency = Number(row.avg_latency ?? 0);
+          const budget = this.sqliteDb
+            .query(
+              `SELECT id, soft_cap, hard_cap
+               FROM token_budgets
+               WHERE window='monthly' AND domain='slack_chat'
+               LIMIT 1`
+            )
+            .get() as Record<string, unknown> | null;
+          if (budget) {
+            let soft = Number(budget.soft_cap ?? 12000);
+            let hard = Number(budget.hard_cap ?? 22000);
+            if (avgLatency > 6000) {
+              soft = Math.max(4000, Math.floor(soft * 0.9));
+              hard = Math.max(8000, Math.floor(hard * 0.9));
+            } else if (avgLatency > 0 && avgLatency < 2500) {
+              soft = Math.min(30000, Math.floor(soft * 1.05));
+              hard = Math.min(50000, Math.floor(hard * 1.05));
+            }
+            this.sqliteDb
+              .query(
+                `UPDATE token_budgets
+                 SET soft_cap=?, hard_cap=?, updated_at=?
+                 WHERE id=?`
+              )
+              .run(soft, hard, this.now().toISOString(), String(budget.id));
+          }
+        }
       }
       await this.db.appendCommandAudit({
         id: crypto.randomUUID(),
@@ -658,6 +1335,20 @@ export class WorkerRuntime {
             : `Run ${task.runId}: failed\n${String(error)}`;
         try {
           await this.slack.postMessage(task.responseChannel, text);
+          if (this.sqliteDb) {
+            this.sqliteDb
+              .query(
+                `INSERT INTO interaction_events
+                 (id, channel, message_type, response_latency, action_taken, sentiment_score, created_at)
+                 VALUES (?, 'slack', ?, ?, 'error_reply', NULL, ?)`
+              )
+              .run(
+                crypto.randomUUID(),
+                task.taskType ?? "unknown",
+                Math.max(0, this.now().getTime() - startedAt.getTime()),
+                this.now().toISOString()
+              );
+          }
         } catch (postError) {
           console.error("[worker] failed to post Slack error reply:", postError);
         }
@@ -734,6 +1425,62 @@ export class WorkerRuntime {
         },
       });
       this.lastGraphAt = nowMs;
+    }
+
+    if (nowMs - this.lastReplayEvalAt >= 24 * 60 * 60 * 1000) {
+      await this.queue.enqueue({
+        dedupeKey: "replay_eval_nightly",
+        priority: "P2",
+        payload: {
+          taskType: "replay_eval_nightly",
+          runId: `run_replay_eval_${nowMs}`,
+          cwd: this.config.primaryRepoPath,
+          title: "Nightly replay eval",
+        },
+      });
+      this.lastReplayEvalAt = nowMs;
+    }
+
+    if (nowMs - this.lastCiAutopilotAt >= 15 * 60 * 1000) {
+      await this.queue.enqueue({
+        dedupeKey: "ci_red_autopilot",
+        priority: "P1",
+        payload: {
+          taskType: "ci_red_autopilot",
+          runId: `run_ci_red_${nowMs}`,
+          cwd: this.config.primaryRepoPath,
+          title: "CI red autopilot",
+        },
+      });
+      this.lastCiAutopilotAt = nowMs;
+    }
+
+    if (nowMs - this.lastMemoryScanAt >= 60 * 60 * 1000) {
+      await this.queue.enqueue({
+        dedupeKey: "memory_contradiction_scan",
+        priority: "P2",
+        payload: {
+          taskType: "memory_contradiction_scan",
+          runId: `run_memory_scan_${nowMs}`,
+          cwd: this.config.primaryRepoPath,
+          title: "Memory contradiction scan",
+        },
+      });
+      this.lastMemoryScanAt = nowMs;
+    }
+
+    if (nowMs - this.lastLatencyGovernorAt >= 15 * 60 * 1000) {
+      await this.queue.enqueue({
+        dedupeKey: "latency_governor",
+        priority: "P1",
+        payload: {
+          taskType: "latency_governor",
+          runId: `run_latency_governor_${nowMs}`,
+          cwd: this.config.primaryRepoPath,
+          title: "Latency/token governor",
+        },
+      });
+      this.lastLatencyGovernorAt = nowMs;
     }
 
     const apsEnabled = this.config.perfScientist.enabled && this.perfScientist;

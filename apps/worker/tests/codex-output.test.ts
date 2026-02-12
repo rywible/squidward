@@ -68,4 +68,15 @@ describe("codex output harness", () => {
     expect(parsed.payload.status).toBe("done");
     expect(parsed.payload.summary).toBe("streamed");
   });
+
+  it("recovers payload when end tag is missing but JSON object is complete", () => {
+    const raw = [
+      '{"type":"thread.started"}',
+      "BEGIN_AGENT_PAYLOAD",
+      '{"status":"blocked","summary":"partial tag recovered","actionsTaken":[],"proposedChanges":{"files":[],"estimatedLoc":0,"risk":"low"},"memoryProposals":[],"nextSteps":["retry"]}',
+    ].join("\n");
+    const parsed = parseCodexPayload(raw);
+    expect(parsed.payload.status).toBe("blocked");
+    expect(parsed.payload.summary).toBe("partial tag recovered");
+  });
 });

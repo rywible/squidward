@@ -507,7 +507,7 @@ describe("api handler", () => {
         type: "message",
         channel: "C123",
         client_msg_id: "cli-1",
-        ts: "1710000000.000100",
+        ts: "4102444800.000100",
         text: "fb rq_abc12345 helpful super useful context",
       },
     };
@@ -561,7 +561,7 @@ describe("api handler", () => {
       event: {
         type: "app_mention",
         channel: "C123",
-        ts: "1710000000.000100",
+        ts: "4102444800.000100",
         text: "<@U123ABC> please check the top perf opportunities",
       },
     };
@@ -597,6 +597,63 @@ describe("api handler", () => {
     expect(payload.payload?.requestText).toBe("please check the top perf opportunities");
   });
 
+  test("routes owner control Slack commands to owner_control tasks", async () => {
+    const dbPath = makeDbPath();
+    const secret = "slack-signing-secret";
+    const db = new Database(dbPath, { strict: false, create: true });
+    db.exec(readFileSync(join(import.meta.dir, "../../../packages/db/migrations/001_initial.sql"), "utf8"));
+    const handler = createHandler({
+      dbPath,
+      env: {
+        AGENT_DB_PATH: dbPath,
+        SLACK_SIGNING_SECRET: secret,
+        SLACK_TRIGGER_USER_IDS: "UOWNER",
+      },
+    });
+
+    const eventBody = {
+      type: "event_callback",
+      event: {
+        type: "message",
+        channel: "D123",
+        user: "UOWNER",
+        client_msg_id: "cli-owner-1",
+        ts: "4102444800.000110",
+        text: "control pause",
+      },
+    };
+
+    const body = JSON.stringify(eventBody);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = signSlackRequest(secret, ts, body);
+    const response = await handler(
+      new Request("http://localhost/slack/events", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-slack-request-timestamp": ts,
+          "x-slack-signature": sig,
+        },
+        body,
+      })
+    );
+    expect(response.status).toBe(202);
+
+    const row = db
+      .query(
+        `SELECT task_type, payload_json
+         FROM task_queue
+         WHERE task_type='owner_control'
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get() as Record<string, unknown> | null;
+    expect(row).not.toBeNull();
+    expect(String(row?.task_type ?? "")).toBe("owner_control");
+    const payload = JSON.parse(String(row?.payload_json ?? "{}")) as { payload?: { controlAction?: string } };
+    expect(payload.payload?.controlAction).toBe("pause");
+  });
+
   test("ignores Slack channel messages from users outside the trigger allowlist", async () => {
     const dbPath = makeDbPath();
     const secret = "slack-signing-secret";
@@ -618,7 +675,7 @@ describe("api handler", () => {
         channel: "C123",
         user: "UNBLOCKED",
         client_msg_id: "cli-2",
-        ts: "1710000000.000100",
+        ts: "4102444800.000100",
         text: "please run your checks",
       },
     };
@@ -666,8 +723,8 @@ describe("api handler", () => {
         channel: "C123",
         user: "UOWNER",
         client_msg_id: "cli-3",
-        ts: "1710000000.000200",
-        thread_ts: "1710000000.000100",
+        ts: "4102444800.000200",
+        thread_ts: "4102444800.000100",
         text: "follow up in thread",
       },
     };
@@ -703,7 +760,7 @@ describe("api handler", () => {
     });
     const body = JSON.stringify({
       type: "event_callback",
-      event: { type: "message", channel: "C123", ts: "1710000000.000100", text: "hello" },
+      event: { type: "message", channel: "C123", ts: "4102444800.000100", text: "hello" },
     });
     const ts = String(Math.floor(Date.now() / 1000) - 3600);
     const sig = signSlackRequest(secret, ts, body);
@@ -731,7 +788,7 @@ describe("api handler", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           type: "event_callback",
-          event: { type: "message", channel: "C123", ts: "1710000000.000100", text: "hello" },
+          event: { type: "message", channel: "C123", ts: "4102444800.000100", text: "hello" },
         }),
       })
     );

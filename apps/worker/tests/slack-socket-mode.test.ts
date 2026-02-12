@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { __testOnly } from "../src/slack-socket-mode";
 
-const { isSlackSelfEvent, shouldHandleSlackMessage, isDirectMessageChannel, isSelfMention, normalizeSlackText, parseSlackAllowedUsers } =
+const { isSlackSelfEvent, shouldHandleSlackMessage, isDirectMessageChannel, isSelfMention, normalizeSlackText, parseSlackAllowedUsers, parseOwnerControlCommand } =
   __testOnly;
 const { isLikelyHeavySlackRequest } = __testOnly;
 
@@ -90,5 +90,20 @@ describe("slack socket mode routing", () => {
   it("classifies heavy Slack requests", () => {
     expect(isLikelyHeavySlackRequest("implement this perf optimization in compiler/src/main.rs")).toBe(true);
     expect(isLikelyHeavySlackRequest("you there squidward?")).toBe(false);
+  });
+
+  it("parses owner control commands", () => {
+    expect(parseOwnerControlCommand("control pause")).toEqual({ action: "pause" });
+    expect(parseOwnerControlCommand("control approve run_123 looks good")).toEqual({
+      action: "approve",
+      target: "run_123",
+      notes: "looks good",
+    });
+    expect(parseOwnerControlCommand("control replace run_123 fix flaky ci in parser")).toEqual({
+      action: "replace",
+      target: "run_123",
+      notes: "fix flaky ci in parser",
+    });
+    expect(parseOwnerControlCommand("why is ci flaky")).toBeNull();
   });
 });

@@ -122,11 +122,46 @@ const parseRetrievalFeedbackCommand = (
   };
 };
 
+type OwnerControlAction = "approve" | "deny" | "why" | "stop" | "pause" | "resume" | "replace";
+const parseOwnerControlCommand = (
+  text: string
+): { action: OwnerControlAction; target?: string; notes?: string } | null => {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^\/?control\s+(approve|deny|why|stop|pause|resume|replace)\b\s*(.*)$/i);
+  if (!match) return null;
+  const action = match[1].toLowerCase() as OwnerControlAction;
+  const rest = (match[2] ?? "").trim();
+  if (action === "pause" || action === "resume") {
+    return { action };
+  }
+  if (action === "replace") {
+    const [target, ...objectiveParts] = rest.split(/\s+/).filter(Boolean);
+    return {
+      action,
+      target,
+      notes: objectiveParts.join(" ").trim() || undefined,
+    };
+  }
+  const [target, ...notesParts] = rest.split(/\s+/).filter(Boolean);
+  return {
+    action,
+    target,
+    notes: notesParts.join(" ").trim() || undefined,
+  };
+};
+
 const normalizeSlackText = (text: string): string =>
   text
     .replace(/<@[A-Z0-9]+>/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const parseSlackTsMs = (ts?: string): number | null => {
+  if (!ts) return null;
+  const numeric = Number(ts);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.trunc(numeric * 1000);
+};
 
 const isDirectMessageChannel = (channel: string): boolean => channel.startsWith("D") || channel.startsWith("G");
 const isThreadReplyEvent = (threadTs?: string, ts?: string): boolean =>
@@ -291,6 +326,8 @@ export const createHandler = (options?: HandlerOptions) => {
     const eventTs = event?.ts ? String(event.ts) : undefined;
     const threadTs = event?.thread_ts ? String(event.thread_ts) : undefined;
     const normalizedText = normalizeSlackText(text) || text.trim();
+    const eventTsMs = parseSlackTsMs(eventTs);
+    const maxEventAgeMs = Math.max(30_000, Math.trunc(Number(env.SLACK_MAX_EVENT_AGE_SECONDS ?? 300) * 1000));
     const selfUserId = env.SLACK_BOT_USER_ID?.trim();
     const allowAllChannelMessages = env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES === "1";
     const allowedUserIds = parseSlackAllowedUsers(env.SLACK_TRIGGER_USER_IDS);
@@ -306,6 +343,10 @@ export const createHandler = (options?: HandlerOptions) => {
       const db = new Database(dbPath, { create: true, strict: false });
       const now = new Date().toISOString();
       if (allowAllChannelMessages && allowedUserIds.length === 0) {
+        db.close();
+        return json({ ok: true, accepted: true }, 202);
+      }
+      if (eventTsMs && Date.now() - eventTsMs > maxEventAgeMs) {
         db.close();
         return json({ ok: true, accepted: true }, 202);
       }
@@ -377,6 +418,44 @@ export const createHandler = (options?: HandlerOptions) => {
         return json({ ok: true, accepted: true }, 202);
       }
 
+      const ownerControl = parseOwnerControlCommand(normalizedText);
+      if (ownerControl) {
+        const runId = `run_owner_control_${Date.now()}`;
+        const dedupeKey = `owner_control:${channel}:${eventTs ?? Date.now()}`;
+        db.query(
+          `INSERT INTO task_queue
+           (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
+           VALUES (?, ?, 'owner_control', ?, 1, 'queued', ?, ?, ?)`
+        ).run(
+          crypto.randomUUID(),
+          runId,
+          JSON.stringify({
+            dedupeKey,
+            payload: {
+              taskType: "owner_control",
+              runId,
+              domain: "slack_control",
+              objective: `Owner command: ${ownerControl.action}`,
+              requestText: normalizedText,
+              responseChannel: channel,
+              repoPath: env.PRIMARY_REPO_PATH ?? "",
+              cwd: env.PRIMARY_REPO_PATH ?? process.cwd(),
+              controlAction: ownerControl.action,
+              controlTarget: ownerControl.target,
+              controlText: ownerControl.notes,
+              title: "Owner control command",
+            },
+            coalescedCount: 0,
+            title: "Owner control command",
+          }),
+          now,
+          now,
+          now
+        );
+        db.close();
+        return json({ ok: true, accepted: true, ownerControl: true, receivedAt: new Date().toISOString() }, 202);
+      }
+
       const heavy = eventType === "app_mention" || isLikelyHeavySlackRequest(normalizedText);
       const runId = `run_slack_${Date.now()}`;
       const dedupeKey = `slack:${heavy ? "heavy" : "chat"}:${channel}:${eventTs ?? Date.now()}`;
@@ -406,7 +485,7 @@ export const createHandler = (options?: HandlerOptions) => {
           coalescedCount: 0,
           title: heavy ? "Slack codex mission" : "Slack chat reply",
         }),
-        heavy ? 2 : 1,
+        1,
         now,
         now,
         now

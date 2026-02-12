@@ -1,66 +1,80 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DashboardApiClient } from './client';
+import { afterEach, describe, expect, it, mock } from "bun:test";
+
+import { DashboardApiClient } from "./client";
+
+const originalFetch = globalThis.fetch;
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  globalThis.fetch = originalFetch;
 });
 
-describe('DashboardApiClient', () => {
-  it('calls cockpit endpoint', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ activeRuns: 2 }),
-    });
+describe("DashboardApiClient", () => {
+  it("calls cockpit endpoint", async () => {
+    const fetchMock = mock(async () =>
+      new Response(JSON.stringify({ activeRuns: 2 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    vi.stubGlobal('fetch', fetchMock);
-
-    const client = new DashboardApiClient('/api');
+    const client = new DashboardApiClient("/api");
     await client.getCockpit();
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/dashboard/cockpit', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/dashboard/cockpit");
   });
 
-  it('posts task actions', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true }),
-    });
+  it("posts task actions", async () => {
+    const fetchMock = mock(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    vi.stubGlobal('fetch', fetchMock);
+    const client = new DashboardApiClient("/api");
+    await client.taskAction("task-7", "retry");
 
-    const client = new DashboardApiClient('/api');
-    await client.taskAction('task-7', 'retry');
-
-    expect(fetchMock).toHaveBeenCalledWith('/api/dashboard/tasks/task-7/actions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'retry' }),
+    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/dashboard/tasks/task-7/actions");
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "retry" }),
     });
   });
 
-  it('calls perf scientist endpoints', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ enabled: true, queuedTasks: 0 }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
+  it("calls perf scientist endpoints", async () => {
+    const fetchMock = mock(async () =>
+      new Response(JSON.stringify({ enabled: true, queuedTasks: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const client = new DashboardApiClient('/api');
+    const client = new DashboardApiClient("/api");
     await client.getPerfScientistStatus();
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/perf-scientist/status', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/perf-scientist/status");
   });
 
-  it('calls retrieval status endpoint', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ enabled: true, p95LatencyMs: 100, cacheHitRate: 0.4, avgUsedTokens: 800 }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
+  it("calls retrieval status endpoint", async () => {
+    const fetchMock = mock(async () =>
+      new Response(JSON.stringify({ enabled: true, p95LatencyMs: 100, cacheHitRate: 0.4, avgUsedTokens: 800 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const client = new DashboardApiClient('/api');
+    const client = new DashboardApiClient("/api");
     await client.getRetrievalStatus();
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/retrieval/status', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/retrieval/status");
   });
 });

@@ -46,6 +46,7 @@ const KEY_ORDER = [
   "MAX_TASKS_PER_HEARTBEAT",
   "MAX_CODEX_SESSIONS",
   "CODEX_WORKTREES_ENABLED",
+  "CI_AUTOPILOT_ENABLED",
   "CODEX_WORKTREE_BASE_REF",
   "CODEX_WORKTREE_ROOT",
   "CODEX_WORKTREE_KEEP_FAILED",
@@ -330,6 +331,12 @@ const main = async (): Promise<void> => {
       rl,
       "Use isolated git worktrees for codex missions (1=yes, 0=no)",
       env.CODEX_WORKTREES_ENABLED,
+      "1"
+    );
+    env.CI_AUTOPILOT_ENABLED = await prompt(
+      rl,
+      "Enable CI red autopilot checks (1=yes, 0=no)",
+      env.CI_AUTOPILOT_ENABLED,
       "1"
     );
     env.CODEX_WORKTREE_BASE_REF = await prompt(

@@ -120,7 +120,11 @@ const runtime = new WorkerRuntime({
     retrievalBudgetTokens: Number(process.env.RETRIEVAL_BUDGET_TOKENS ?? 4000),
     maxTasksPerHeartbeat: Number(process.env.MAX_TASKS_PER_HEARTBEAT ?? 8),
     maxCodexSessions: Number(process.env.MAX_CODEX_SESSIONS ?? 4),
+    slackReservedSlots: Number(process.env.SLACK_RESERVED_SLOTS ?? 2),
+    slackChatTimeoutMs: Number(process.env.SLACK_CHAT_TIMEOUT_MS ?? 45000),
+    slackMissionTimeoutMs: Number(process.env.SLACK_MISSION_TIMEOUT_MS ?? 90000),
     codexWorktreesEnabled: process.env.CODEX_WORKTREES_ENABLED !== "0",
+    ciAutopilotEnabled: process.env.CI_AUTOPILOT_ENABLED !== "0",
     perfScientist: {
       enabled: process.env.PERF_SCIENTIST_ENABLED === "1",
       nightlyHour: Number(process.env.PERF_SCIENTIST_NIGHTLY_HOUR ?? 2),
@@ -244,6 +248,7 @@ if (socketModeEnabled) {
         selfUserId,
         allowedUserIds: parseSlackAllowedUsers(process.env.SLACK_TRIGGER_USER_IDS),
         allowAllChannelMessages: process.env.SLACK_ALLOW_ALL_CHANNEL_MESSAGES === "1",
+        maxEventAgeSeconds: Math.max(30, Number(process.env.SLACK_MAX_EVENT_AGE_SECONDS ?? 300)),
         onTaskQueued: () => runtime.poke(),
       });
     } else {

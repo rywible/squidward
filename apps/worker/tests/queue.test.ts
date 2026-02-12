@@ -60,4 +60,27 @@ describe("SerializedTaskProcessor", () => {
     expect(queue[0]?.coalescedCount).toBe(1);
     expect(queue[0]?.payload).toEqual({ revision: 2 });
   });
+
+  it("can claim a matching task first for reserved lanes", async () => {
+    const db = new InMemoryWorkerDb();
+    let now = new Date("2026-02-12T10:00:00.000Z");
+    const processor = new SerializedTaskProcessor<{ taskType: string; domain?: string }>(db, {
+      now: () => now,
+    });
+
+    await processor.enqueue({ dedupeKey: "bg", priority: "P0", payload: { taskType: "maintenance" } });
+    now = new Date(now.getTime() + 1_000);
+    await processor.enqueue({
+      dedupeKey: "slack",
+      priority: "P1",
+      payload: { taskType: "codex_mission", domain: "slack" },
+    });
+
+    const claimed = await processor.claimNextWhere(
+      (task) => task.payload.taskType === "codex_mission" && task.payload.domain === "slack"
+    );
+    expect(claimed).not.toBeNull();
+    expect(claimed?.payload.taskType).toBe("codex_mission");
+    expect(claimed?.payload.domain).toBe("slack");
+  });
 });

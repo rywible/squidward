@@ -109,10 +109,8 @@ export const buildMissionPack = (input: {
       repoKeys: repoLearningFacts.map((item) => item.key),
       persona: personaTraits.map((item) => `${item.name}:${item.value.toFixed(2)}`),
       episodes: recentEpisodes.map((item) => item.runId),
-      retrievalQueryId: retrieval.queryId,
       retrievalIntent: retrieval.intent,
-      retrievalUsedTokens: retrieval.usedTokens,
-      retrievalEvidenceRefs: retrieval.evidenceRefs,
+      retrievalEvidenceRefs: retrieval.evidenceRefs.slice(0, 20).sort(),
     })
   );
   const cacheKey = `mission:${input.repoPath}:${input.task.taskType ?? "maintenance"}:${input.objective}:${retrieval.intent}`;

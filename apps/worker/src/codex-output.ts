@@ -119,7 +119,54 @@ export const extractTaggedPayloadBlocks = (raw: string): string[] => {
       blocks.push(block);
     }
   }
+  if (blocks.length === 0 && startOnly >= 0) {
+    const afterStart = raw.slice(startOnly + START_TAG.length).trim();
+    const recovered = extractFirstJsonObject(afterStart);
+    if (recovered) {
+      blocks.push(recovered);
+    }
+  }
   return blocks;
+};
+
+const extractFirstJsonObject = (value: string): string | null => {
+  const start = value.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < value.length; i += 1) {
+    const ch = value[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, i + 1).trim();
+      }
+    }
+  }
+  return null;
 };
 
 const parseJsonSafe = (value: string): unknown | null => {
@@ -128,6 +175,12 @@ const parseJsonSafe = (value: string): unknown | null => {
   } catch {
     return null;
   }
+};
+
+const isLikelyPayloadRoot = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.status === "string" || typeof row.summary === "string";
 };
 
 const looksLikePayloadObject = (value: unknown): value is Record<string, unknown> => {
@@ -203,6 +256,16 @@ const gatherPayloadCandidates = (raw: string): string[] => {
       candidates.push(lineTagged);
       continue;
     }
+    if (trimmed.includes(START_TAG)) {
+      const recovered = extractFirstJsonObject(trimmed.slice(trimmed.indexOf(START_TAG) + START_TAG.length));
+      if (recovered) {
+        candidates.push(recovered);
+      }
+    }
+    const bracketRecovered = extractFirstJsonObject(trimmed);
+    if (bracketRecovered) {
+      candidates.push(bracketRecovered);
+    }
   }
 
   candidates.push(raw);
@@ -274,7 +337,7 @@ export const parseCodexPayload = (raw: string): ParsedCodexPayload => {
   let parsedSource = "";
   for (const candidate of candidates) {
     const reparsed = tryParseJson(candidate);
-    if (reparsed) {
+    if (reparsed && isLikelyPayloadRoot(reparsed.value)) {
       parsed = reparsed.value;
       parsedSource = reparsed.source;
       break;

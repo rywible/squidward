@@ -13,6 +13,7 @@ interface SlackSocketModeListenerDeps {
   allowedUserIds?: string[];
   onTaskQueued?: () => void | Promise<void>;
   now?: () => Date;
+  maxEventAgeSeconds?: number;
 }
 
 interface SlackEnvelope {
@@ -52,11 +53,46 @@ const parseRetrievalFeedbackCommand = (
   };
 };
 
+type OwnerControlAction = "approve" | "deny" | "why" | "stop" | "pause" | "resume" | "replace";
+const parseOwnerControlCommand = (
+  text: string
+): { action: OwnerControlAction; target?: string; notes?: string } | null => {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^\/?control\s+(approve|deny|why|stop|pause|resume|replace)\b\s*(.*)$/i);
+  if (!match) return null;
+  const action = match[1].toLowerCase() as OwnerControlAction;
+  const rest = (match[2] ?? "").trim();
+  if (action === "pause" || action === "resume") {
+    return { action };
+  }
+  if (action === "replace") {
+    const [target, ...objectiveParts] = rest.split(/\s+/).filter(Boolean);
+    return {
+      action,
+      target,
+      notes: objectiveParts.join(" ").trim() || undefined,
+    };
+  }
+  const [target, ...notesParts] = rest.split(/\s+/).filter(Boolean);
+  return {
+    action,
+    target,
+    notes: notesParts.join(" ").trim() || undefined,
+  };
+};
+
 const normalizeSlackText = (text: string): string =>
   text
     .replace(/<@[A-Z0-9]+>/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const parseSlackTsMs = (ts?: string): number | null => {
+  if (!ts) return null;
+  const numeric = Number(ts);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.trunc(numeric * 1000);
+};
 const isSlackSelfEvent = (event: {
   bot_id?: string;
   user?: string;
@@ -152,10 +188,12 @@ export class SlackSocketModeListener {
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly now: () => Date;
+  private readonly maxEventAgeMs: number;
 
   constructor(deps: SlackSocketModeListenerDeps) {
     this.deps = deps;
     this.now = deps.now ?? (() => new Date());
+    this.maxEventAgeMs = Math.max(30_000, (deps.maxEventAgeSeconds ?? 300) * 1000);
   }
 
   async start(): Promise<void> {
@@ -252,6 +290,10 @@ export class SlackSocketModeListener {
     const ts = event.ts;
     const threadTs = event.thread_ts;
     const normalizedText = normalizeSlackText(text) || text.trim();
+    const eventTsMs = parseSlackTsMs(ts);
+    if (eventTsMs && this.now().getTime() - eventTsMs > this.maxEventAgeMs) {
+      return;
+    }
     if (!channel || !text.trim()) return;
     const allowedUserIds = this.deps.allowedUserIds ?? [];
     const allowAllChannelMessages = this.deps.allowAllChannelMessages ?? false;
@@ -305,6 +347,33 @@ export class SlackSocketModeListener {
       return;
     }
 
+    const control = parseOwnerControlCommand(normalizedText);
+    if (control) {
+      const runId = `run_owner_control_${Date.now()}`;
+      await this.deps.queue.enqueue({
+        dedupeKey: `owner_control:${channel}:${event.ts ?? Date.now()}`,
+        priority: "P0",
+        payload: {
+          taskType: "owner_control",
+          runId,
+          domain: "slack_control",
+          objective: `Owner command: ${control.action}`,
+          requestText: normalizedText,
+          responseChannel: channel,
+          repoPath: this.deps.primaryRepoPath,
+          cwd: this.deps.primaryRepoPath,
+          controlAction: control.action,
+          controlTarget: control.target,
+          controlText: control.notes,
+          title: "Owner control command",
+        },
+      });
+      if (this.deps.onTaskQueued) {
+        await this.deps.onTaskQueued();
+      }
+      return;
+    }
+
     if (
       !shouldHandleSlackMessage(
         eventType,
@@ -323,7 +392,7 @@ export class SlackSocketModeListener {
     const runId = `run_slack_${Date.now()}`;
     const enqueueResult = await this.deps.queue.enqueue({
       dedupeKey: `slack:${heavy ? "heavy" : "chat"}:${channel}:${event.ts ?? Date.now()}`,
-      priority: heavy ? "P1" : "P0",
+      priority: "P0",
       payload: {
         taskType: heavy ? "codex_mission" : "slack_chat_reply",
         runId,
@@ -357,5 +426,6 @@ export const __testOnly = {
   parseSlackAllowedUsers,
   isAllowedSlackUser,
   isLikelyHeavySlackRequest,
+  parseOwnerControlCommand,
   normalizeSlackText,
 };

@@ -37,6 +37,7 @@ export interface CodexHarnessRunInput {
   objectiveDetails: string;
   cwd: string;
   model?: string;
+  timeoutMs?: number;
 }
 
 export class CodexHarness {
@@ -55,7 +56,7 @@ export class CodexHarness {
       writeFileSync(promptFile, prompt, "utf8");
       const promptFileQuoted = shellEscapeSingle(promptFile);
       const firstCandidates = buildCommandCandidates(codexCmd, quoted, promptFileQuoted);
-      const first = await this.runFirstSuccessful(firstCandidates, input.cwd, "first");
+      const first = await this.runFirstSuccessful(firstCandidates, input.cwd, "first", input.timeoutMs);
       const firstRaw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
       try {
         const parsed = parseCodexPayload(firstRaw);
@@ -76,7 +77,7 @@ export class CodexHarness {
         writeFileSync(repairFile, repairFullPrompt, "utf8");
         const repairFileQuoted = shellEscapeSingle(repairFile);
         const secondCandidates = buildCommandCandidates(codexCmd, repairQuoted, repairFileQuoted);
-        const second = await this.runFirstSuccessful(secondCandidates, input.cwd, "repair");
+        const second = await this.runFirstSuccessful(secondCandidates, input.cwd, "repair", input.timeoutMs);
         const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
         this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);
         try {
@@ -94,11 +95,12 @@ export class CodexHarness {
   private async runFirstSuccessful(
     commands: string[],
     cwd: string,
-    stage: "first" | "repair"
+    stage: "first" | "repair",
+    timeoutMs?: number
   ): Promise<{ exitCode: number; artifactRefs: string[] }> {
     let lastFailure = "no_command_attempted";
     for (const command of commands) {
-      const result = await this.codex.runCommand(command, cwd);
+      const result = await this.codex.runCommand(command, cwd, { timeoutMs });
       if (result.exitCode === 0) {
         return result;
       }

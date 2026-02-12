@@ -848,3 +848,37 @@ CREATE TABLE IF NOT EXISTS retrieval_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_query_created
 ON retrieval_feedback(query_id, created_at DESC);
+
+-- Ops governance extensions.
+CREATE TABLE IF NOT EXISTS replay_eval_runs (
+  id TEXT PRIMARY KEY,
+  sample_size INTEGER NOT NULL DEFAULT 0,
+  avg_latency_ms REAL NOT NULL DEFAULT 0,
+  lane_accuracy REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_eval_runs_created_at
+ON replay_eval_runs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS memory_contradictions (
+  id TEXT PRIMARY KEY,
+  fact_key TEXT NOT NULL,
+  canonical_value_json TEXT NOT NULL,
+  repo_value_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_contradictions_status_created
+ON memory_contradictions(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ci_red_autopilot_heads (
+  head_sha TEXT PRIMARY KEY,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  last_enqueued_at TEXT,
+  last_state TEXT NOT NULL,
+  last_run_url TEXT
+);

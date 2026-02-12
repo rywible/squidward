@@ -35,7 +35,10 @@ export class MemoryGovernor {
       return result;
     }
 
-    for (const proposal of proposals) {
+    const ordered = [...proposals]
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 16);
+    for (const proposal of ordered) {
       const routed = this.route(proposal);
       if (routed.status !== "accepted") {
         if (routed.status === "rejected") result.rejected += 1;
@@ -81,11 +84,14 @@ export class MemoryGovernor {
     if (proposal.citations.length === 0 && proposal.layerHint !== "working") {
       return { status: "rejected", reason: "missing_citations" };
     }
-    if (proposal.confidence < 0.45) {
+    if (proposal.confidence < 0.5) {
       return { status: "pending_owner", reason: "low_confidence" };
     }
-    if (proposal.layerHint === "canonical" && proposal.confidence < 0.6) {
+    if (proposal.layerHint === "canonical" && proposal.confidence < 0.7) {
       return { status: "pending_owner", reason: "canonical_needs_more_confidence" };
+    }
+    if (proposal.layerHint === "policy" && proposal.confidence < 0.75) {
+      return { status: "pending_owner", reason: "policy_needs_more_confidence" };
     }
     return { status: "accepted", reason: "gate_passed" };
   }
@@ -98,6 +104,19 @@ export class MemoryGovernor {
     const existing = this.db
       .query(`SELECT id, fact_value_json FROM memory_facts WHERE id=? LIMIT 1`)
       .get(factId) as { id: string; fact_value_json: string } | null;
+    const incomingValue = stableString(proposal.value);
+    let normalizedExisting: string | null = null;
+    if (existing?.fact_value_json) {
+      try {
+        normalizedExisting = stableString(JSON.parse(existing.fact_value_json));
+      } catch {
+        normalizedExisting = existing.fact_value_json;
+      }
+    }
+
+    if (normalizedExisting && normalizedExisting === incomingValue) {
+      return;
+    }
 
     this.db
       .query(
@@ -114,7 +133,7 @@ export class MemoryGovernor {
         factId,
         namespace,
         proposal.key,
-        stableString(proposal.value),
+        incomingValue,
         proposal.confidence,
         source,
         now,
@@ -139,13 +158,19 @@ export class MemoryGovernor {
         crypto.randomUUID(),
         factId,
         nextVersion,
-        stableString(proposal.value),
+        incomingValue,
         proposal.type,
         nextVersion > 1 ? nextVersion - 1 : null,
         now
       );
 
     for (const citation of proposal.citations) {
+      const alreadyLinked = this.db
+        .query(`SELECT id FROM memory_evidence_links WHERE fact_id=? AND source_ref=? LIMIT 1`)
+        .get(factId, citation) as { id?: string } | null;
+      if (alreadyLinked?.id) {
+        continue;
+      }
       this.db
         .query(
           `INSERT INTO memory_evidence_links
