@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, join, normalize } from "node:path";
+import { basename, isAbsolute, join, normalize, resolve } from "node:path";
 import { Database } from "@squidward/db";
 import { file } from "bun";
 
@@ -15,6 +15,14 @@ interface HandlerOptions {
   fetchImpl?: FetchLike;
   runCommand?: CommandRunner;
 }
+
+const workspaceRoot = resolve(import.meta.dir, "../../..");
+const resolveDbPath = (rawPath?: string): string => {
+  if (!rawPath) {
+    return normalize(resolve(workspaceRoot, ".data/agent.db"));
+  }
+  return normalize(isAbsolute(rawPath) ? rawPath : resolve(workspaceRoot, rawPath));
+};
 
 const json = (body: unknown, status = 200): Response =>
   Response.json(body, {
@@ -148,7 +156,7 @@ const handleUnifiedAction = async (
 
 export const createHandler = (options?: HandlerOptions) => {
   const env = options?.env ?? process.env;
-  const dbPath = options?.dbPath ?? env.AGENT_DB_PATH ?? normalize(join(process.cwd(), ".data/agent.db"));
+  const dbPath = resolveDbPath(options?.dbPath ?? env.AGENT_DB_PATH);
 
   const services = createInMemoryServices({ dbPath });
   const integrations = createIntegrationsService({
@@ -197,10 +205,13 @@ export const createHandler = (options?: HandlerOptions) => {
     const channel = event?.channel ? String(event.channel) : "";
     const text = event?.text ? String(event.text) : "";
     const eventTs = event?.ts ? String(event.ts) : undefined;
-    if (eventType === "message" && subtype !== "bot_message" && channel && text.trim().length > 0) {
+    const isActionableMessage = eventType === "message" && subtype !== "bot_message";
+    const isActionableMention = eventType === "app_mention";
+    if ((isActionableMessage || isActionableMention) && channel && text.trim().length > 0) {
+      const normalizedText = text.replace(/<@[A-Z0-9]+>/g, "").trim() || text.trim();
       const db = new Database(dbPath, { create: true, strict: false });
       const now = new Date().toISOString();
-      const retrievalFeedback = parseRetrievalFeedbackCommand(text);
+      const retrievalFeedback = parseRetrievalFeedbackCommand(normalizedText);
       if (retrievalFeedback) {
         const queryExists = db
           .query(`SELECT id FROM retrieval_queries WHERE id=? LIMIT 1`)
@@ -257,7 +268,7 @@ export const createHandler = (options?: HandlerOptions) => {
             domain: "slack",
             objective: "Respond to Slack user request with memory-grounded answer and actions",
             title: "Slack codex mission",
-            requestText: text,
+            requestText: normalizedText,
             responseChannel: channel,
             responseThreadTs: eventTs,
             repoPath: env.PRIMARY_REPO_PATH ?? "",

@@ -541,6 +541,61 @@ describe("api handler", () => {
     expect(String(row?.notes ?? "")).toContain("super useful context");
   });
 
+  test("accepts app_mention events and enqueues codex mission tasks", async () => {
+    const dbPath = makeDbPath();
+    const secret = "slack-signing-secret";
+    const db = new Database(dbPath, { strict: false, create: true });
+    db.exec(readFileSync(join(import.meta.dir, "../../../packages/db/migrations/001_initial.sql"), "utf8"));
+    const handler = createHandler({
+      dbPath,
+      env: {
+        AGENT_DB_PATH: dbPath,
+        SLACK_SIGNING_SECRET: secret,
+        PRIMARY_REPO_PATH: "/Users/ryanwible/projects/wrela",
+      },
+    });
+
+    const eventBody = {
+      type: "event_callback",
+      event: {
+        type: "app_mention",
+        channel: "C123",
+        ts: "1710000000.000100",
+        text: "<@U123ABC> please check the top perf opportunities",
+      },
+    };
+
+    const body = JSON.stringify(eventBody);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = signSlackRequest(secret, ts, body);
+    const response = await handler(
+      new Request("http://localhost/slack/events", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-slack-request-timestamp": ts,
+          "x-slack-signature": sig,
+        },
+        body,
+      })
+    );
+    expect(response.status).toBe(202);
+
+    const row = db
+      .query(
+        `SELECT payload_json
+         FROM task_queue
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get() as Record<string, unknown> | null;
+    expect(row).not.toBeNull();
+    const payload = JSON.parse(String(row?.payload_json ?? "{}")) as {
+      payload?: { requestText?: string };
+    };
+    expect(payload.payload?.requestText).toBe("please check the top perf opportunities");
+  });
+
   test("rejects stale Slack signatures to prevent replay", async () => {
     const dbPath = makeDbPath();
     const secret = "slack-signing-secret";

@@ -1,6 +1,6 @@
 import { buildHash64Embedding, Database } from "@squidward/db";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import type {
   ActionRequest,
@@ -49,6 +49,14 @@ import type { Services } from "./interfaces";
 interface ServiceOptions {
   dbPath: string;
 }
+
+const workspaceRoot = resolve(import.meta.dir, "../../../..");
+const resolveDbPath = (rawPath?: string): string => {
+  if (!rawPath) {
+    return resolve(workspaceRoot, ".data/agent.db");
+  }
+  return isAbsolute(rawPath) ? rawPath : resolve(workspaceRoot, rawPath);
+};
 
 type SqlRecord = Record<string, unknown>;
 
@@ -212,7 +220,7 @@ const actionMessage = (action: TaskAction, input: ActionRequest): string => {
 };
 
 export const createInMemoryServices = (options?: ServiceOptions): Services => {
-  const dbPath = options?.dbPath ?? resolve(process.cwd(), ".data/agent.db");
+  const dbPath = resolveDbPath(options?.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true, strict: false });
   migrate(db);

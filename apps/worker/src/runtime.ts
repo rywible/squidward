@@ -96,6 +96,7 @@ export class WorkerRuntime {
   private mode: SchedulerMode = "idle";
   private timer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
+  private heartbeating = false;
 
   constructor(deps: WorkerRuntimeDeps) {
     this.db = deps.db;
@@ -145,56 +146,75 @@ export class WorkerRuntime {
   }
 
   async heartbeat(): Promise<void> {
-    const now = this.now();
-    await this.enqueueScheduledJobs(now);
-    const workerMode = await this.db.getWorkerMode();
-    const queueDepthBefore = await this.db.countReadyQueueItems(now);
-    const hasQueuedWork = queueDepthBefore > 0;
-    const incident = await this.hasActiveIncident();
-    const nextMode = selectSchedulerMode({
-      now,
-      hasQueuedWork,
-      hasActiveIncident: incident,
-    });
-    this.mode = nextMode;
-
-    await this.db.saveWorkerState({
-      mode: nextMode,
-      heartbeatAt: now,
-      queueDepth: queueDepthBefore,
-      activeSessionId: this.sessions.getActiveSession()?.id ?? null,
-    });
-
-    if (workerMode !== "paused") {
-      await this.queue.processNext(async (task) => {
-        const session = this.sessions.start(task.id);
-        try {
-          const payload =
-            task.payload && typeof task.payload === "object"
-              ? (task.payload as WorkerTaskPayload)
-              : ({
-                  taskType: "maintenance",
-                  runId: task.id,
-                  command: "true",
-                  cwd: this.config.primaryRepoPath,
-                  title: "Recovered malformed queue payload",
-                } as WorkerTaskPayload);
-          await this.executeTask(payload);
-        } finally {
-          this.sessions.end(session.id);
-        }
-      });
+    if (this.heartbeating) {
+      return;
     }
+    this.heartbeating = true;
+    try {
+      const now = this.now();
+      await this.enqueueScheduledJobs(now);
+      const workerMode = await this.db.getWorkerMode();
+      const queueDepthBefore = await this.db.countReadyQueueItems(now);
+      const hasQueuedWork = queueDepthBefore > 0;
+      const incident = await this.hasActiveIncident();
+      const nextMode = selectSchedulerMode({
+        now,
+        hasQueuedWork,
+        hasActiveIncident: incident,
+      });
+      this.mode = nextMode;
 
-    const postRunNow = this.now();
-    await this.db.saveWorkerState({
-      mode: this.mode,
-      heartbeatAt: postRunNow,
-      queueDepth: await this.db.countReadyQueueItems(postRunNow),
-      activeSessionId: this.sessions.getActiveSession()?.id ?? null,
-    });
+      await this.db.saveWorkerState({
+        mode: nextMode,
+        heartbeatAt: now,
+        queueDepth: queueDepthBefore,
+        activeSessionId: this.sessions.getActiveSession()?.id ?? null,
+      });
 
-    this.scheduleNext();
+      if (workerMode !== "paused") {
+        try {
+          await this.queue.processNext(async (task) => {
+            const session = this.sessions.start(task.id);
+            try {
+              const payload =
+                task.payload && typeof task.payload === "object"
+                  ? (task.payload as WorkerTaskPayload)
+                  : ({
+                      taskType: "maintenance",
+                      runId: task.id,
+                      command: "true",
+                      cwd: this.config.primaryRepoPath,
+                      title: "Recovered malformed queue payload",
+                    } as WorkerTaskPayload);
+              await this.executeTask(payload);
+            } finally {
+              this.sessions.end(session.id);
+            }
+          });
+        } catch (error) {
+          console.error("[worker] task execution failed:", error);
+        }
+      }
+
+      const postRunNow = this.now();
+      await this.db.saveWorkerState({
+        mode: this.mode,
+        heartbeatAt: postRunNow,
+        queueDepth: await this.db.countReadyQueueItems(postRunNow),
+        activeSessionId: this.sessions.getActiveSession()?.id ?? null,
+      });
+
+      this.scheduleNext();
+    } finally {
+      this.heartbeating = false;
+    }
+  }
+
+  async poke(): Promise<void> {
+    if (!this.started) {
+      return;
+    }
+    await this.heartbeat();
   }
 
   private scheduleNext(): void {
@@ -330,7 +350,7 @@ export class WorkerRuntime {
           ]
             .filter(Boolean)
             .join("\n");
-          await this.slack.postMessage(task.responseChannel, reply);
+          await this.slack.postMessage(task.responseChannel, reply, { threadTs: task.responseThreadTs });
         }
       } else if (taskType === "portfolio_eval") {
         this.moonshot.runPortfolioRankerDaily(this.config.portfolioTopN, this.config.portfolioMinEvAutorun);
@@ -483,6 +503,14 @@ export class WorkerRuntime {
         artifactRefs: [`taskType=${taskType}`],
       });
     } catch (error) {
+      if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
+        const text = `Run ${task.runId}: failed\n${String(error)}`;
+        try {
+          await this.slack.postMessage(task.responseChannel, text, { threadTs: task.responseThreadTs });
+        } catch {
+          // best effort only
+        }
+      }
       await this.db.appendCommandAudit({
         id: crypto.randomUUID(),
         runId: task.runId,

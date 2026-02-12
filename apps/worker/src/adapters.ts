@@ -13,7 +13,7 @@ export type ExecRunner = (command: string, args?: string[], options?: ExecOption
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface SlackAdapter {
-  postMessage(channel: string, text: string): Promise<void>;
+  postMessage(channel: string, text: string, options?: { threadTs?: string }): Promise<void>;
 }
 
 export interface GithubGhAdapter {
@@ -135,19 +135,23 @@ export class RealSlackAdapter implements SlackAdapter {
     this.fetchImpl = deps?.fetchImpl ?? defaultFetch;
   }
 
-  async postMessage(channel: string, text: string): Promise<void> {
+  async postMessage(channel: string, text: string, options?: { threadTs?: string }): Promise<void> {
     if (!this.token) {
       throw new Error("SLACK_BOT_TOKEN is required for Slack adapter");
     }
 
     const normalized = normalizeSlackMessageInput(channel, text);
+    const payloadBody: Record<string, string> = { channel: normalized.channel, text: normalized.text };
+    if (options?.threadTs) {
+      payloadBody.thread_ts = options.threadTs;
+    }
     const response = await this.fetchImpl("https://slack.com/api/chat.postMessage", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify({ channel: normalized.channel, text: normalized.text }),
+      body: JSON.stringify(payloadBody),
     });
 
     const payload = (await response.json()) as { ok?: boolean; error?: string };

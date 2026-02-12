@@ -1,4 +1,4 @@
-import { normalize, resolve } from "node:path";
+import { isAbsolute, normalize, resolve } from "node:path";
 
 import { SqliteWorkerDb } from "./db";
 import { SerializedTaskProcessor } from "./queue";
@@ -21,8 +21,17 @@ import { PerfScientist } from "./perf-scientist";
 import { CodexHarness } from "./codex-harness";
 import { MemoryGovernor } from "./memory-governor";
 import { WrelaLearningService } from "./wrela-learning";
+import { SlackSocketModeListener } from "./slack-socket-mode";
 
-const dbPath = normalize(process.env.AGENT_DB_PATH ?? resolve(process.cwd(), ".data/agent.db"));
+const workspaceRoot = resolve(import.meta.dir, "../../..");
+const resolveDbPath = (rawPath?: string): string => {
+  if (!rawPath) {
+    return normalize(resolve(workspaceRoot, ".data/agent.db"));
+  }
+  return normalize(isAbsolute(rawPath) ? rawPath : resolve(workspaceRoot, rawPath));
+};
+
+const dbPath = resolveDbPath(process.env.AGENT_DB_PATH);
 const useStubExecutor = process.env.WORKER_USE_STUB_EXECUTOR === "1";
 
 const db = new SqliteWorkerDb({ dbPath });
@@ -102,6 +111,19 @@ const runtime = new WorkerRuntime({
   },
 });
 
+const socketModeEnabled = process.env.SLACK_SOCKET_MODE_ENABLED === "1";
+const slackSocketListener =
+  socketModeEnabled && process.env.SLACK_APP_TOKEN
+    ? new SlackSocketModeListener({
+        appToken: process.env.SLACK_APP_TOKEN,
+        primaryRepoPath:
+          process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
+        queue,
+        db: db.db,
+        onTaskQueued: () => runtime.poke(),
+      })
+    : null;
+
 const writePreflightAudit = async (
   runId: string,
   command: string,
@@ -173,10 +195,21 @@ await queue.enqueue({
 });
 
 await runtime.start();
+if (socketModeEnabled) {
+  if (!slackSocketListener) {
+    console.warn("[worker] SLACK_SOCKET_MODE_ENABLED=1 but SLACK_APP_TOKEN is missing; socket mode disabled");
+  } else {
+    await slackSocketListener.start();
+    console.log("[worker] Slack Socket Mode listener started");
+  }
+}
 
-console.log(`[worker] started with db=${dbPath} stubExecutor=${useStubExecutor}`);
+console.log(
+  `[worker] started with db=${dbPath} stubExecutor=${useStubExecutor} slackSocketMode=${socketModeEnabled ? "on" : "off"}`
+);
 
 process.on("SIGINT", () => {
+  slackSocketListener?.stop();
   runtime.stop();
   process.exit(0);
 });

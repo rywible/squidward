@@ -21,6 +21,8 @@ const KEY_ORDER = [
   "API_HOST",
   "API_PORT",
   "SLACK_BOT_TOKEN",
+  "SLACK_APP_TOKEN",
+  "SLACK_SOCKET_MODE_ENABLED",
   "SLACK_SIGNING_SECRET",
   "LINEAR_API_KEY",
   "BRAVE_API_KEY",
@@ -196,6 +198,18 @@ const main = async (): Promise<void> => {
 
     printSection("Slack Integration");
     env.SLACK_BOT_TOKEN = await prompt(rl, "Slack bot token", env.SLACK_BOT_TOKEN, "");
+    env.SLACK_APP_TOKEN = await prompt(
+      rl,
+      "Slack app token (xapp-..., required for Socket Mode)",
+      env.SLACK_APP_TOKEN,
+      ""
+    );
+    env.SLACK_SOCKET_MODE_ENABLED = await prompt(
+      rl,
+      "Enable Slack Socket Mode (1=yes, 0=no)",
+      env.SLACK_SOCKET_MODE_ENABLED,
+      "1"
+    );
     env.SLACK_SIGNING_SECRET = await prompt(rl, "Slack signing secret", env.SLACK_SIGNING_SECRET, "");
 
     printSection("Linear Integration");
