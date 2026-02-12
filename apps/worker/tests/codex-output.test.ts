@@ -20,4 +20,18 @@ describe("codex output harness", () => {
     expect(parsed.payload.status).toBe("done");
     expect(parsed.payload.summary).toBe("ok");
   });
+
+  it("parses payload wrapped inside codex exec json output_text", () => {
+    const wrapped = JSON.stringify({
+      type: "response.completed",
+      output_text: [
+        "BEGIN_AGENT_PAYLOAD",
+        '{"status":"done","summary":"wrapped ok","actionsTaken":[],"proposedChanges":{"files":[],"estimatedLoc":0,"risk":"low"},"memoryProposals":[],"nextSteps":[]}',
+        "END_AGENT_PAYLOAD",
+      ].join("\n"),
+    });
+    const parsed = parseCodexPayload(wrapped);
+    expect(parsed.payload.status).toBe("done");
+    expect(parsed.payload.summary).toBe("wrapped ok");
+  });
 });

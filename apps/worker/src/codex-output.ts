@@ -51,6 +51,86 @@ const normalizeCandidateJson = (value: string): string => {
   return stripped.replace(/,\s*([}\]])/g, "$1");
 };
 
+const parseJsonSafe = (value: string): unknown | null => {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+};
+
+const looksLikePayloadObject = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    (typeof row.status === "string" || typeof row.summary === "string") &&
+    ("actionsTaken" in row || "actions_taken" in row || "proposedChanges" in row || "proposed_changes" in row)
+  );
+};
+
+const extractTextCandidates = (value: unknown, output: string[], depth = 0): void => {
+  if (depth > 6 || output.length > 200) return;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      output.push(trimmed);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      extractTextCandidates(item, output, depth + 1);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  const row = value as Record<string, unknown>;
+  const prioritized = ["output_text", "text", "content", "message", "response", "delta", "value"];
+  for (const key of prioritized) {
+    if (key in row) {
+      extractTextCandidates(row[key], output, depth + 1);
+    }
+  }
+  for (const item of Object.values(row)) {
+    extractTextCandidates(item, output, depth + 1);
+  }
+};
+
+const gatherPayloadCandidates = (raw: string): string[] => {
+  const candidates: string[] = [];
+  const directTagged = extractTaggedPayload(raw);
+  if (directTagged) {
+    candidates.push(directTagged);
+  }
+
+  const directJson = parseJsonSafe(raw);
+  if (looksLikePayloadObject(directJson)) {
+    candidates.push(JSON.stringify(directJson));
+  }
+  extractTextCandidates(directJson, candidates);
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const lineTagged = extractTaggedPayload(trimmed);
+    if (lineTagged) {
+      candidates.push(lineTagged);
+      continue;
+    }
+    const lineJson = parseJsonSafe(trimmed);
+    if (looksLikePayloadObject(lineJson)) {
+      candidates.push(JSON.stringify(lineJson));
+    }
+    extractTextCandidates(lineJson, candidates);
+  }
+
+  candidates.push(raw);
+  const deduped = [...new Set(candidates.map((item) => item.trim()).filter((item) => item.length > 0))];
+  return deduped.slice(0, 100);
+};
+
 export const extractTaggedPayload = (raw: string): string | null => {
   const start = raw.indexOf(START_TAG);
   const end = raw.indexOf(END_TAG);
@@ -104,16 +184,19 @@ const asAction = (value: unknown): CodexActionEntry | null => {
 };
 
 export const parseCodexPayload = (raw: string): ParsedCodexPayload => {
-  const extracted = extractTaggedPayload(raw);
-  if (!extracted) {
-    throw new Error("missing_tagged_payload");
-  }
-
-  const candidates = [extracted, normalizeCandidateJson(extracted)];
+  const candidates = gatherPayloadCandidates(raw).flatMap((candidate) => {
+    const tagged = extractTaggedPayload(candidate);
+    if (tagged) {
+      return [tagged, normalizeCandidateJson(tagged)];
+    }
+    return [candidate, normalizeCandidateJson(candidate)];
+  });
   let parsed: unknown | null = null;
+  let parsedSource = "";
   for (const candidate of candidates) {
     try {
       parsed = JSON.parse(candidate) as unknown;
+      parsedSource = candidate;
       break;
     } catch {
       // Continue to fallback candidate.
@@ -166,8 +249,8 @@ export const parseCodexPayload = (raw: string): ParsedCodexPayload => {
 
   return {
     payload,
-    rawJson: extracted,
-    contextHash: createHash("sha256").update(extracted).digest("hex"),
+    rawJson: parsedSource,
+    contextHash: createHash("sha256").update(parsedSource).digest("hex"),
   };
 };
 
