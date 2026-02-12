@@ -1,0 +1,19 @@
+{
+  "name": "@squidward/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@squidward/db": "workspace:*"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": true,
+    "baseUrl": ".",
+    "esModuleInterop": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

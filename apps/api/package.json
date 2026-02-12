@@ -1,0 +1,21 @@
+{
+  "name": "@squidward/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@squidward/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.2",
+    "typescript": "^5.7.3"
+  }
+}
