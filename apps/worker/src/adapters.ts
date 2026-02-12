@@ -254,9 +254,11 @@ export class StubCodexCliAdapter implements CodexCliAdapter {
 
 export class RealCodexCliAdapter implements CodexCliAdapter {
   private readonly execRunner: ExecRunner;
+  private readonly codexBin: string;
 
   constructor(deps?: { execRunner?: ExecRunner }) {
     this.execRunner = deps?.execRunner ?? defaultExecRunner;
+    this.codexBin = process.env.CODEX_CLI_PATH?.trim() || "codex";
   }
 
   async runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }> {
@@ -269,7 +271,7 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
   }
 
   async preflightAvailability(): Promise<{ ok: boolean; details: string[] }> {
-    const result = await this.execRunner("codex", ["--version"]);
+    const result = await this.execRunner(this.codexBin, ["--version"]);
     return {
       ok: result.exitCode === 0,
       details: [result.stdout.trim(), result.stderr.trim()].filter((part) => part.length > 0),

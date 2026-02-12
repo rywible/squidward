@@ -8,6 +8,7 @@ import { recordTokenUsage } from "./token-economy";
 const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
 
 const shellEscapeSingle = (value: string): string => value.replace(/'/g, `'\\''`);
+const codexCliPath = (): string => process.env.CODEX_CLI_PATH?.trim() || "codex";
 
 export interface CodexHarnessRunInput {
   missionPack: MissionPack;
@@ -25,7 +26,8 @@ export class CodexHarness {
   async run(input: CodexHarnessRunInput): Promise<ParsedCodexPayload> {
     const prompt = `${renderMissionPrompt(input.missionPack, input.objectiveDetails)}\n\n${buildCodexOutputContract()}`;
     const quoted = shellEscapeSingle(prompt);
-    const command = `printf '%s' '${quoted}' | codex`;
+    const codexCmd = shellEscapeSingle(codexCliPath());
+    const command = `printf '%s' '${quoted}' | '${codexCmd}'`;
 
     const first = await this.codex.runCommand(command, input.cwd);
     if (first.exitCode !== 0) {
@@ -43,7 +45,7 @@ export class CodexHarness {
         buildCodexOutputContract(),
       ].join("\n");
       const repairQuoted = shellEscapeSingle(`${prompt}\n\n${repairPrompt}`);
-      const secondCmd = `printf '%s' '${repairQuoted}' | codex`;
+      const secondCmd = `printf '%s' '${repairQuoted}' | '${codexCmd}'`;
       const second = await this.codex.runCommand(secondCmd, input.cwd);
       if (second.exitCode !== 0) {
         throw new Error(`codex_command_failed:repair:${second.exitCode}:${second.artifactRefs.join(" | ").slice(0, 500)}`);

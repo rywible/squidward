@@ -31,6 +31,7 @@ const KEY_ORDER = [
   "WORKER_USE_STUB_EXECUTOR",
   "WORKER_BOOTSTRAP_COMMAND",
   "CODEX_PREFLIGHT_AUTH_COMMAND",
+  "CODEX_CLI_PATH",
   "PORTFOLIO_TOP_N",
   "PORTFOLIO_MIN_EV_AUTORUN",
   "TEST_GEN_MAX_CANDIDATES_PER_BUG",
@@ -239,6 +240,12 @@ const main = async (): Promise<void> => {
       "Optional Codex auth preflight command",
       env.CODEX_PREFLIGHT_AUTH_COMMAND,
       ""
+    );
+    env.CODEX_CLI_PATH = await prompt(
+      rl,
+      "Codex CLI binary path",
+      env.CODEX_CLI_PATH,
+      "codex"
     );
     env.PORTFOLIO_TOP_N = await prompt(rl, "Portfolio top-N candidates", env.PORTFOLIO_TOP_N, "5");
     env.PORTFOLIO_MIN_EV_AUTORUN = await prompt(
