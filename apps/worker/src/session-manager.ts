@@ -4,12 +4,17 @@ export interface CodexSession {
   startedAt: Date;
 }
 
-export class SingleCodexSessionManager {
-  private activeSession: CodexSession | null = null;
+export class CodexSessionManager {
+  private readonly maxConcurrent: number;
+  private readonly sessions = new Map<string, CodexSession>();
+
+  constructor(maxConcurrent = 1) {
+    this.maxConcurrent = Math.max(1, maxConcurrent);
+  }
 
   start(taskId: string): CodexSession {
-    if (this.activeSession) {
-      throw new Error(`Cannot start session for task ${taskId}; active session ${this.activeSession.id} already exists`);
+    if (this.sessions.size >= this.maxConcurrent) {
+      throw new Error(`Cannot start session for task ${taskId}; capacity ${this.maxConcurrent} reached`);
     }
 
     const session: CodexSession = {
@@ -17,21 +22,31 @@ export class SingleCodexSessionManager {
       taskId,
       startedAt: new Date(),
     };
-    this.activeSession = session;
+    this.sessions.set(session.id, session);
     return session;
   }
 
   end(sessionId: string): void {
-    if (!this.activeSession) {
+    if (!this.sessions.has(sessionId)) {
       return;
     }
-    if (this.activeSession.id !== sessionId) {
-      throw new Error(`Cannot end session ${sessionId}; active session is ${this.activeSession.id}`);
-    }
-    this.activeSession = null;
+    this.sessions.delete(sessionId);
   }
 
   getActiveSession(): CodexSession | null {
-    return this.activeSession ? { ...this.activeSession } : null;
+    const first = this.sessions.values().next().value as CodexSession | undefined;
+    return first ? { ...first } : null;
+  }
+
+  getActiveSessions(): CodexSession[] {
+    return [...this.sessions.values()].map((session) => ({ ...session }));
+  }
+
+  getActiveCount(): number {
+    return this.sessions.size;
+  }
+
+  getAvailableSlots(): number {
+    return Math.max(0, this.maxConcurrent - this.sessions.size);
   }
 }

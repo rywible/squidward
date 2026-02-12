@@ -2,7 +2,7 @@ import { isAbsolute, normalize, resolve } from "node:path";
 
 import { SqliteWorkerDb } from "./db";
 import { SerializedTaskProcessor } from "./queue";
-import { SingleCodexSessionManager } from "./session-manager";
+import { CodexSessionManager } from "./session-manager";
 import {
   RealCodexCliAdapter,
   RealGithubGhAdapter,
@@ -22,6 +22,7 @@ import { CodexHarness } from "./codex-harness";
 import { MemoryGovernor } from "./memory-governor";
 import { WrelaLearningService } from "./wrela-learning";
 import { SlackSocketModeListener } from "./slack-socket-mode";
+import { WorktreeManager } from "./worktree-manager";
 
 const workspaceRoot = resolve(import.meta.dir, "../../..");
 const resolveDbPath = (rawPath?: string): string => {
@@ -36,7 +37,7 @@ const useStubExecutor = process.env.WORKER_USE_STUB_EXECUTOR === "1";
 
 const db = new SqliteWorkerDb({ dbPath });
 const queue = new SerializedTaskProcessor<WorkerTaskPayload>(db, { coalesceWindowMs: 15 * 60_000 });
-const sessions = new SingleCodexSessionManager();
+const sessions = new CodexSessionManager(Number(process.env.MAX_CODEX_SESSIONS ?? 4));
 const codexCli: CodexCliAdapter = useStubExecutor ? new StubCodexCliAdapter() : new RealCodexCliAdapter();
 const ghAdapter: GithubGhAdapter = useStubExecutor ? new StubGithubGhAdapter() : new RealGithubGhAdapter();
 const slackAdapter: SlackAdapter = useStubExecutor ? new StubSlackAdapter() : new RealSlackAdapter();
@@ -44,6 +45,11 @@ const audit = new CommandAuditService(db, codexCli);
 const moonshot = new MoonshotEngine(db.db);
 const codexHarness = new CodexHarness(codexCli, db.db);
 const memoryGovernor = new MemoryGovernor(db.db);
+const worktrees = new WorktreeManager({
+  rootDir: process.env.CODEX_WORKTREE_ROOT,
+  baseRef: process.env.CODEX_WORKTREE_BASE_REF ?? "main",
+  keepFailed: process.env.CODEX_WORKTREE_KEEP_FAILED !== "0",
+});
 const wrlelaLearning = new WrelaLearningService(
   db.db,
   process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela")
@@ -91,6 +97,7 @@ const runtime = new WorkerRuntime({
   perfScientist,
   codexHarness,
   memoryGovernor,
+  worktrees,
   wrelaLearning: wrlelaLearning,
   slack: slackAdapter,
   config: {
@@ -104,6 +111,8 @@ const runtime = new WorkerRuntime({
       process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
     retrievalBudgetTokens: Number(process.env.RETRIEVAL_BUDGET_TOKENS ?? 4000),
     maxTasksPerHeartbeat: Number(process.env.MAX_TASKS_PER_HEARTBEAT ?? 8),
+    maxCodexSessions: Number(process.env.MAX_CODEX_SESSIONS ?? 4),
+    codexWorktreesEnabled: process.env.CODEX_WORKTREES_ENABLED !== "0",
     perfScientist: {
       enabled: process.env.PERF_SCIENTIST_ENABLED === "1",
       nightlyHour: Number(process.env.PERF_SCIENTIST_NIGHTLY_HOUR ?? 2),

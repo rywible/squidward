@@ -33,6 +33,7 @@ const KEY_ORDER = [
   "CODEX_PREFLIGHT_AUTH_COMMAND",
   "CODEX_CLI_PATH",
   "NODE_BIN_PATH",
+  "CODEX_COMMAND_TIMEOUT_MS",
   "PORTFOLIO_TOP_N",
   "PORTFOLIO_MIN_EV_AUTORUN",
   "TEST_GEN_MAX_CANDIDATES_PER_BUG",
@@ -40,6 +41,11 @@ const KEY_ORDER = [
   "MEMO_HOUR",
   "GRAPH_REINDEX_CRON",
   "MAX_TASKS_PER_HEARTBEAT",
+  "MAX_CODEX_SESSIONS",
+  "CODEX_WORKTREES_ENABLED",
+  "CODEX_WORKTREE_BASE_REF",
+  "CODEX_WORKTREE_ROOT",
+  "CODEX_WORKTREE_KEEP_FAILED",
   "PERF_SCIENTIST_ENABLED",
   "PERF_SCIENTIST_REPO_PATH",
   "PERF_SCIENTIST_BENCHMARK_ROOT",
@@ -254,6 +260,12 @@ const main = async (): Promise<void> => {
       env.NODE_BIN_PATH,
       ""
     );
+    env.CODEX_COMMAND_TIMEOUT_MS = await prompt(
+      rl,
+      "Codex command timeout ms",
+      env.CODEX_COMMAND_TIMEOUT_MS,
+      "120000"
+    );
     env.PORTFOLIO_TOP_N = await prompt(rl, "Portfolio top-N candidates", env.PORTFOLIO_TOP_N, "5");
     env.PORTFOLIO_MIN_EV_AUTORUN = await prompt(
       rl,
@@ -286,6 +298,36 @@ const main = async (): Promise<void> => {
       "Max tasks processed per heartbeat",
       env.MAX_TASKS_PER_HEARTBEAT,
       "8"
+    );
+    env.MAX_CODEX_SESSIONS = await prompt(
+      rl,
+      "Max concurrent Codex sessions",
+      env.MAX_CODEX_SESSIONS,
+      "4"
+    );
+    env.CODEX_WORKTREES_ENABLED = await prompt(
+      rl,
+      "Use isolated git worktrees for codex missions (1=yes, 0=no)",
+      env.CODEX_WORKTREES_ENABLED,
+      "1"
+    );
+    env.CODEX_WORKTREE_BASE_REF = await prompt(
+      rl,
+      "Codex worktree base ref",
+      env.CODEX_WORKTREE_BASE_REF,
+      "main"
+    );
+    env.CODEX_WORKTREE_ROOT = await prompt(
+      rl,
+      "Optional absolute worktree root dir",
+      env.CODEX_WORKTREE_ROOT,
+      ""
+    );
+    env.CODEX_WORKTREE_KEEP_FAILED = await prompt(
+      rl,
+      "Keep failed codex worktrees for debugging (1=yes, 0=no)",
+      env.CODEX_WORKTREE_KEEP_FAILED,
+      "1"
     );
 
     printSection("Perf Scientist");

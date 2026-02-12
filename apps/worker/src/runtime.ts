@@ -3,7 +3,7 @@ import type { SchedulerMode } from "./types";
 import type { SlackAdapter } from "./adapters";
 import { schedulerIntervalMs, selectSchedulerMode } from "./scheduler";
 import { SerializedTaskProcessor } from "./queue";
-import { SingleCodexSessionManager } from "./session-manager";
+import { CodexSessionManager } from "./session-manager";
 import { CommandAuditService } from "./audit";
 import { MoonshotEngine } from "./moonshot";
 import { PerfScientist, type PerfScientistConfig } from "./perf-scientist";
@@ -13,6 +13,7 @@ import { WrelaLearningService } from "./wrela-learning";
 import { buildMissionPack } from "./mission-pack";
 import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
+import { WorktreeManager } from "./worktree-manager";
 
 export type WorkerTaskType =
   | "maintenance"
@@ -49,7 +50,7 @@ export interface WorkerTaskPayload {
 export interface WorkerRuntimeDeps {
   db: WorkerDb;
   queue: SerializedTaskProcessor<WorkerTaskPayload>;
-  sessions: SingleCodexSessionManager;
+  sessions: CodexSessionManager;
   audit: CommandAuditService;
   hasActiveIncident: () => Promise<boolean>;
   moonshot: MoonshotEngine;
@@ -57,6 +58,7 @@ export interface WorkerRuntimeDeps {
   codexHarness?: CodexHarness;
   memoryGovernor?: MemoryGovernor;
   wrelaLearning?: WrelaLearningService;
+  worktrees?: WorktreeManager;
   slack?: SlackAdapter;
   config?: {
     portfolioTopN?: number;
@@ -68,6 +70,8 @@ export interface WorkerRuntimeDeps {
     primaryRepoPath?: string;
     retrievalBudgetTokens?: number;
     maxTasksPerHeartbeat?: number;
+    maxCodexSessions?: number;
+    codexWorktreesEnabled?: boolean;
     perfScientist?: Partial<PerfScientistConfig>;
   };
   now?: () => Date;
@@ -76,7 +80,7 @@ export interface WorkerRuntimeDeps {
 export class WorkerRuntime {
   private readonly db: WorkerDb;
   private readonly queue: SerializedTaskProcessor<WorkerTaskPayload>;
-  private readonly sessions: SingleCodexSessionManager;
+  private readonly sessions: CodexSessionManager;
   private readonly audit: CommandAuditService;
   private readonly hasActiveIncident: () => Promise<boolean>;
   private readonly moonshot: MoonshotEngine;
@@ -84,6 +88,7 @@ export class WorkerRuntime {
   private readonly codexHarness: CodexHarness | null;
   private readonly memoryGovernor: MemoryGovernor | null;
   private readonly wrelaLearning: WrelaLearningService | null;
+  private readonly worktrees: WorktreeManager | null;
   private readonly slack: SlackAdapter | null;
   private readonly sqliteDb: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } | null;
   private readonly config: Required<NonNullable<WorkerRuntimeDeps["config"]>>;
@@ -111,6 +116,7 @@ export class WorkerRuntime {
     this.codexHarness = deps.codexHarness ?? null;
     this.memoryGovernor = deps.memoryGovernor ?? null;
     this.wrelaLearning = deps.wrelaLearning ?? null;
+    this.worktrees = deps.worktrees ?? null;
     this.slack = deps.slack ?? null;
     this.sqliteDb = (this.db as { db?: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db ?? null;
     this.config = {
@@ -123,6 +129,8 @@ export class WorkerRuntime {
       primaryRepoPath: deps.config?.primaryRepoPath ?? process.cwd(),
       retrievalBudgetTokens: Math.max(512, Math.min(16000, deps.config?.retrievalBudgetTokens ?? 4000)),
       maxTasksPerHeartbeat: Math.max(1, Math.min(50, deps.config?.maxTasksPerHeartbeat ?? 8)),
+      maxCodexSessions: Math.max(1, Math.min(16, deps.config?.maxCodexSessions ?? 4)),
+      codexWorktreesEnabled: deps.config?.codexWorktreesEnabled ?? true,
       perfScientist: {
         enabled: deps.config?.perfScientist?.enabled ?? false,
         nightlyHour: deps.config?.perfScientist?.nightlyHour ?? 2,
@@ -177,28 +185,41 @@ export class WorkerRuntime {
 
       if (workerMode !== "paused") {
         try {
-          for (let i = 0; i < this.config.maxTasksPerHeartbeat; i += 1) {
-            const processed = await this.queue.processNext(async (task) => {
-              const session = this.sessions.start(task.id);
-              try {
-                const payload =
-                  task.payload && typeof task.payload === "object"
-                    ? (task.payload as WorkerTaskPayload)
-                    : ({
-                        taskType: "maintenance",
-                        runId: task.id,
-                        command: "true",
-                        cwd: this.config.primaryRepoPath,
-                        title: "Recovered malformed queue payload",
-                      } as WorkerTaskPayload);
-                await this.executeTask(payload);
-              } finally {
-                this.sessions.end(session.id);
-              }
-            });
-            if (!processed) {
+          const availableSlots = Math.max(0, Math.min(this.config.maxTasksPerHeartbeat, this.sessions.getAvailableSlots()));
+          const work: Array<Promise<void>> = [];
+          for (let i = 0; i < availableSlots; i += 1) {
+            const claimed = await this.queue.claimNext();
+            if (!claimed) {
               break;
             }
+            const session = this.sessions.start(claimed.id);
+            const payload =
+              claimed.payload && typeof claimed.payload === "object"
+                ? (claimed.payload as WorkerTaskPayload)
+                : ({
+                    taskType: "maintenance",
+                    runId: claimed.id,
+                    command: "true",
+                    cwd: this.config.primaryRepoPath,
+                    title: "Recovered malformed queue payload",
+                  } as WorkerTaskPayload);
+            work.push(
+              (async () => {
+                let success = true;
+                try {
+                  await this.executeTask(payload);
+                } catch (error) {
+                  success = false;
+                  console.error("[worker] task execution failed:", error);
+                } finally {
+                  await this.queue.finalize(claimed.id, success);
+                  this.sessions.end(session.id);
+                }
+              })()
+            );
+          }
+          if (work.length > 0) {
+            await Promise.allSettled(work);
           }
         } catch (error) {
           console.error("[worker] task execution failed:", error);
@@ -273,13 +294,22 @@ export class WorkerRuntime {
         if (!this.codexHarness || !this.memoryGovernor) {
           throw new Error("codex_harness_not_configured");
         }
+        const canonicalRepoPath = task.repoPath ?? this.config.primaryRepoPath;
+        let executionCwd = task.cwd ?? canonicalRepoPath;
+        let lease: { cleanup(success: boolean): void; path: string } | null = null;
+        let missionSucceeded = false;
+        if (this.worktrees && this.config.codexWorktreesEnabled) {
+          lease = this.worktrees.acquire(canonicalRepoPath, task.runId);
+          executionCwd = lease.path;
+        }
+        try {
         const domain = task.domain ?? "general";
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
         const objective = task.objective ?? task.title ?? "Execute codex mission";
         const missionPack = buildMissionPack({
           db: this.sqliteDb as never,
           task,
-          repoPath: task.repoPath ?? this.config.primaryRepoPath,
+          repoPath: canonicalRepoPath,
           objective,
           tokenEnvelope,
           retrievalBudgetTokens: this.config.retrievalBudgetTokens,
@@ -287,7 +317,7 @@ export class WorkerRuntime {
         const parsed = await this.codexHarness.run({
           missionPack,
           objectiveDetails: task.requestText ?? task.command ?? objective,
-          cwd: task.cwd ?? this.config.primaryRepoPath,
+          cwd: executionCwd,
           model: task.model,
         });
         const memoryResult = this.memoryGovernor.commit(task.runId, parsed.payload.memoryProposals, "codex_harness");
@@ -371,6 +401,16 @@ export class WorkerRuntime {
             .filter(Boolean)
             .join("\n");
           await this.slack.postMessage(task.responseChannel, reply, { threadTs: task.responseThreadTs });
+        }
+        missionSucceeded = true;
+        } finally {
+          if (lease) {
+            try {
+              lease.cleanup(missionSucceeded);
+            } catch (cleanupError) {
+              console.error("[worker] failed to cleanup worktree lease:", cleanupError);
+            }
+          }
         }
       } else if (taskType === "portfolio_eval") {
         this.moonshot.runPortfolioRankerDaily(this.config.portfolioTopN, this.config.portfolioMinEvAutorun);

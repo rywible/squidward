@@ -9,6 +9,7 @@ interface ExecResult {
 interface ExecOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 }
 
 export type ExecRunner = (command: string, args?: string[], options?: ExecOptions) => Promise<ExecResult>;
@@ -44,9 +45,32 @@ const defaultExecRunner: ExecRunner = async (command, args = [], options) => {
     stderr: "pipe",
     env: options?.env ?? process.env,
   });
+  const timeoutMs = options?.timeoutMs ?? 0;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  if (timeoutMs > 0) {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // no-op
+      }
+    }, timeoutMs);
+  }
   const exitCode = await proc.exited;
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
+  if (timedOut) {
+    return {
+      exitCode: 124,
+      stdout,
+      stderr: `${stderr}\ncommand_timeout_ms=${timeoutMs}`.trim(),
+    };
+  }
   return { exitCode, stdout, stderr };
 };
 
@@ -285,15 +309,21 @@ export class RealCodexCliAdapter implements CodexCliAdapter {
   private readonly execRunner: ExecRunner;
   private readonly codexBin: string;
   private readonly runtimeEnv: NodeJS.ProcessEnv;
+  private readonly commandTimeoutMs: number;
 
   constructor(deps?: { execRunner?: ExecRunner }) {
     this.execRunner = deps?.execRunner ?? defaultExecRunner;
     this.codexBin = process.env.CODEX_CLI_PATH?.trim() || "codex";
     this.runtimeEnv = buildRuntimeEnv(process.env);
+    this.commandTimeoutMs = Math.max(5_000, Number(process.env.CODEX_COMMAND_TIMEOUT_MS ?? 120_000));
   }
 
   async runCommand(command: string, cwd: string): Promise<{ exitCode: number; artifactRefs: string[] }> {
-    const result = await this.execRunner("bash", ["-c", command], { cwd, env: this.runtimeEnv });
+    const result = await this.execRunner("bash", ["-c", command], {
+      cwd,
+      env: this.runtimeEnv,
+      timeoutMs: this.commandTimeoutMs,
+    });
 
     return {
       exitCode: result.exitCode,

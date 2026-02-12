@@ -22,7 +22,6 @@ export class SerializedTaskProcessor<T = unknown> {
   private readonly db: WorkerDb;
   private readonly coalesceWindowMs: number;
   private readonly now: () => Date;
-  private running = false;
 
   constructor(db: WorkerDb, options?: { coalesceWindowMs?: number; now?: () => Date }) {
     this.db = db;
@@ -65,34 +64,33 @@ export class SerializedTaskProcessor<T = unknown> {
   }
 
   async processNext(handler: QueueTaskHandler<T>): Promise<QueueItem<T> | null> {
-    if (this.running) {
-      return null;
-    }
-
-    const next = await this.pickNextReadyTask();
+    const next = await this.claimNext();
     if (!next) {
       return null;
     }
 
-    this.running = true;
-    const now = this.now();
-    await this.db.updateQueueItemStatus(next.id, "running", now);
-
     try {
       await handler(next as QueueItem<T>);
-      await this.db.updateQueueItemStatus(next.id, "done", this.now());
+      await this.finalize(next.id, true);
     } catch (error) {
-      await this.db.updateQueueItemStatus(next.id, "failed", this.now());
+      await this.finalize(next.id, false);
       throw error;
-    } finally {
-      this.running = false;
     }
 
     return next as QueueItem<T>;
   }
 
-  isRunning(): boolean {
-    return this.running;
+  async claimNext(): Promise<QueueItem<T> | null> {
+    const next = await this.pickNextReadyTask();
+    if (!next) {
+      return null;
+    }
+    await this.db.updateQueueItemStatus(next.id, "running", this.now());
+    return next as QueueItem<T>;
+  }
+
+  async finalize(taskId: string, success: boolean): Promise<void> {
+    await this.db.updateQueueItemStatus(taskId, success ? "done" : "failed", this.now());
   }
 
   private async pickNextReadyTask(): Promise<QueueItem | null> {
