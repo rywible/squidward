@@ -29,7 +29,7 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
@@ -38,6 +38,7 @@ body {
   background: var(--bg-0);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
 }
 
 h1,
@@ -71,6 +72,10 @@ h3 {
   width: min(1240px, 100% - 2rem);
   margin: 0 auto;
   padding: 0.9rem 0 1.1rem;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .density-compact .panel,
@@ -222,6 +227,8 @@ h3 {
   min-width: 0;
   display: grid;
   gap: 0.55rem;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .page-header-mobile {
@@ -231,6 +238,8 @@ h3 {
 .page-content section {
   display: grid;
   gap: 0.62rem;
+  min-height: 0;
+  overflow: auto;
 }
 
 .panel,
@@ -926,13 +935,17 @@ code {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 0.8rem;
-  min-height: calc(100vh - 11.5rem);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-sidebar-card,
 .chat-main-card {
   min-height: 0;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .chat-sidebar-head,
@@ -946,9 +959,10 @@ code {
 .chat-conversation-list {
   display: grid;
   gap: 0.4rem;
-  max-height: calc(100vh - 16rem);
+  min-height: 0;
   overflow: auto;
   padding-right: 0.18rem;
+  align-content: start;
 }
 
 .chat-conversation-search {
@@ -1022,6 +1036,7 @@ code {
   gap: 0.72rem;
   grid-template-rows: 1fr auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .chat-message-list {
@@ -1111,6 +1126,26 @@ code {
 .history-list {
   display: grid;
   gap: 0.5rem;
+  min-height: 0;
+}
+
+.history-page {
+  height: 100%;
+  overflow: hidden !important;
+}
+
+.history-page .ui-card {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.history-page .ui-card__content {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.2rem;
 }
 
 .history-row {
@@ -1159,7 +1194,7 @@ code {
 @media (max-width: 980px) {
   .chat-page {
     grid-template-columns: 1fr;
-    min-height: auto;
+    min-height: 0;
   }
 
   .chat-conversation-list {
@@ -1171,7 +1206,7 @@ code {
   }
 
   .chat-message-list {
-    max-height: 52vh;
+    max-height: none;
   }
 
   .chat-main-head {

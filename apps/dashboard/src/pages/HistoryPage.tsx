@@ -56,7 +56,7 @@ export function HistoryPage() {
   };
 
   return (
-    <section className="minimal-grid">
+    <section className="minimal-grid history-page">
       <PageState loading={loading} error={error} refreshing={refreshing} onRefresh={refresh} />
       <Card>
         <CardHeader className="history-head">
