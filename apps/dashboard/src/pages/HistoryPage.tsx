@@ -13,6 +13,19 @@ const formatTime = (iso: string): string => {
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
 };
 
+const formatRelative = (iso: string): string => {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const deltaMs = Date.now() - parsed.getTime();
+  const deltaMin = Math.round(deltaMs / 60000);
+  if (deltaMin < 1) return 'just now';
+  if (deltaMin < 60) return `${deltaMin}m ago`;
+  const deltaHr = Math.round(deltaMin / 60);
+  if (deltaHr < 24) return `${deltaHr}h ago`;
+  const deltaDay = Math.round(deltaHr / 24);
+  return `${deltaDay}d ago`;
+};
+
 export function HistoryPage() {
   const HistoryIcon = appIcons.history;
   const DoneIcon = appIcons.done;
@@ -23,6 +36,7 @@ export function HistoryPage() {
 
   const { data, loading, error, refreshing, refresh } = usePollingQuery((signal) => dashboardApiClient.getRuns(signal), 7000);
   const [filter, setFilter] = useState<Filter>('all');
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     const rows = data ?? [];
@@ -64,26 +78,41 @@ export function HistoryPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="simple-list">
+          <div className="history-list">
             {filtered.length === 0 ? <p className="muted">No runs for this filter.</p> : null}
             {filtered.slice(0, 80).map((run: RunSummary) => (
-              <details key={run.id} className="history-item">
-                <summary>
+              <button
+                key={run.id}
+                type="button"
+                className={`history-row${expandedRunId === run.id ? ' expanded' : ''}`}
+                onClick={() => setExpandedRunId((prev) => (prev === run.id ? null : run.id))}
+              >
+                <div className="history-row-main">
                   <span className="history-item-main">
                     {statusIcon(run.status)}
                     <span>{run.objective}</span>
                   </span>
                   <span className="history-item-end">
                     <span className={`status-chip status-chip--${run.status}`}>{run.status}</span>
-                    <span className="history-expand">
-                      <ExpandClosedIcon className="icon icon-14 history-expand-closed" aria-hidden="true" />
+                    {expandedRunId === run.id ? (
                       <ExpandOpenIcon className="icon icon-14 history-expand-open" aria-hidden="true" />
-                    </span>
+                    ) : (
+                      <ExpandClosedIcon className="icon icon-14 history-expand-closed" aria-hidden="true" />
+                    )}
                   </span>
-                </summary>
-                <p className="muted">{formatTime(run.updatedAt)}</p>
-                <p className="muted">Run ID: {run.id}</p>
-              </details>
+                </div>
+                <div className="history-row-sub">
+                  <span>{formatRelative(run.updatedAt)}</span>
+                  <span>{run.triggerType}</span>
+                  {typeof run.durationMs === 'number' ? <span>{Math.round(run.durationMs / 1000)}s</span> : null}
+                </div>
+                {expandedRunId === run.id ? (
+                  <div className="history-row-detail">
+                    <p className="muted">{formatTime(run.updatedAt)}</p>
+                    <p className="muted">Run ID: {run.id}</p>
+                  </div>
+                ) : null}
+              </button>
             ))}
           </div>
         </CardContent>

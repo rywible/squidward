@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { dashboardApiClient } from '../api/client';
 import type { Conversation, ConversationMessage, ChatComposerMode } from '../types/dashboard';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -10,6 +10,20 @@ const formatTime = (iso?: string): string => {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
   return parsed.toLocaleString();
+};
+
+const relativeTime = (iso?: string): string => {
+  if (!iso) return '';
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const deltaMs = Date.now() - parsed.getTime();
+  const deltaMin = Math.round(deltaMs / 60000);
+  if (deltaMin < 1) return 'now';
+  if (deltaMin < 60) return `${deltaMin}m`;
+  const deltaHr = Math.round(deltaMin / 60);
+  if (deltaHr < 24) return `${deltaHr}h`;
+  const deltaDay = Math.round(deltaHr / 24);
+  return `${deltaDay}d`;
 };
 
 const titleFromMessage = (text: string): string => {
@@ -35,6 +49,7 @@ export function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === conversationId) ?? null,
@@ -117,6 +132,12 @@ export function ChatPage() {
     };
   }, [conversationId, loadConversations, loadMessages]);
 
+  useEffect(() => {
+    const el = messageListRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
   const onCreateConversation = async () => {
     try {
       const title = titleFromMessage(composer);
@@ -140,8 +161,7 @@ export function ChatPage() {
     }
   };
 
-  const onSend = async (event: FormEvent) => {
-    event.preventDefault();
+  const dispatchMessage = async () => {
     if (!conversationId || !composer.trim() || busy) return;
     const content = composer.trim();
     const autoMission = /\b(run|execute|fix|implement|refactor|open pr|benchmark|investigate|ship|patch)\b/i.test(content);
@@ -149,6 +169,35 @@ export function ChatPage() {
     setComposer('');
     setBusy(true);
     setError(null);
+    const nowIso = new Date().toISOString();
+    const optimisticRunId = `optimistic_${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `user_${Date.now()}`,
+        conversationId,
+        role: 'user',
+        mode: resolvedMode,
+        status: 'done',
+        content,
+        runId: optimisticRunId,
+        evidenceRefs: [],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+      {
+        id: `assistant_${Date.now()}`,
+        conversationId,
+        role: 'assistant',
+        mode: resolvedMode,
+        status: 'running',
+        content: '',
+        runId: optimisticRunId,
+        evidenceRefs: [],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
     try {
       await dashboardApiClient.sendConversationMessage({
         conversationId,
@@ -161,6 +210,18 @@ export function ChatPage() {
       setError(sendError instanceof Error ? sendError.message : String(sendError));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const onSend = (event: FormEvent) => {
+    event.preventDefault();
+    void dispatchMessage();
+  };
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      void dispatchMessage();
     }
   };
 
@@ -208,7 +269,9 @@ export function ChatPage() {
               type="button"
             >
               <span className="chat-conversation-title">{conversation.title}</span>
-              <span className="chat-conversation-time">{formatTime(conversation.lastMessageAt ?? conversation.updatedAt)}</span>
+              <span className="chat-conversation-time">
+                {relativeTime(conversation.lastMessageAt ?? conversation.updatedAt)} · {formatTime(conversation.lastMessageAt ?? conversation.updatedAt)}
+              </span>
             </button>
           ))}
         </CardContent>
@@ -258,7 +321,7 @@ export function ChatPage() {
         </CardHeader>
 
         <CardContent className="chat-main-body">
-          <div className="chat-message-list">
+          <div ref={messageListRef} className="chat-message-list">
             {messages.length === 0 ? <p className="muted">No messages yet. Start the conversation.</p> : null}
             {messages.map((message) => (
               <article key={message.id} className={`chat-message chat-message--${message.role}`}>
@@ -267,7 +330,7 @@ export function ChatPage() {
                   {message.status !== 'done' ? <span>{message.status}</span> : null}
                   {message.evidenceRefs.length > 0 ? <span>{message.evidenceRefs.length} refs</span> : null}
                 </header>
-                <p>{message.content || (message.role === 'assistant' ? '...' : '')}</p>
+                <p>{message.content || (message.role === 'assistant' ? 'Thinking...' : '')}</p>
               </article>
             ))}
           </div>
@@ -277,11 +340,12 @@ export function ChatPage() {
               aria-label="Message"
               className="chat-composer-input"
               onChange={(event) => setComposer(event.currentTarget.value)}
+              onKeyDown={onComposerKeyDown}
               placeholder="Ask Squidward anything..."
               value={composer}
             />
             <div className="chat-composer-actions">
-              {error ? <span className="chat-error">{error}</span> : <span className="muted">Mode: {mode}</span>}
+              {error ? <span className="chat-error">{error}</span> : <span className="muted">Enter to send · Shift+Enter for newline · Mode: {mode}</span>}
               <Button type="submit" disabled={busy || !composer.trim()}>
                 <SendIcon className="icon icon-16" aria-hidden="true" />
                 {busy ? 'Sending...' : 'Send'}
