@@ -732,6 +732,53 @@ code {
   align-content: start;
 }
 
+.focus-priority-card {
+  border-color: rgba(56, 189, 248, 0.32);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.focus-priority-head {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.focus-priority-body {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.focus-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.focus-step {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.72rem;
+  background: rgba(9, 9, 11, 0.4);
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.focus-step-title {
+  font-weight: 600;
+  color: var(--fg-0);
+}
+
+.focus-grid {
+  display: grid;
+  gap: 0.56rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.focus-risk-card {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
 .metric-row {
   margin-top: 0.35rem;
   margin-bottom: 0.35rem;
@@ -903,6 +950,15 @@ code {
 
   .minimal-grid--three {
     grid-template-columns: 1fr;
+  }
+
+  .focus-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-priority-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

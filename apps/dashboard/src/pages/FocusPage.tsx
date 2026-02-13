@@ -81,21 +81,86 @@ export function FocusPage() {
     return <PageState loading={loading} error={error} refreshing={refreshing} onRefresh={refresh} />;
   }
 
+  const hasRisk = (riskCard?.needsDecisionCount ?? 0) > 0;
+  const topOpportunity = nextCard?.items?.[0] ?? null;
+  const topActiveRun = nowCard?.activeRuns?.[0] ?? null;
+
   return (
-    <section className="minimal-grid minimal-grid--three focus-page">
+    <section className="minimal-grid focus-page">
       <PageState loading={loading} error={error} refreshing={refreshing} onRefresh={refresh} />
 
+      <Card className="focus-priority-card">
+        <CardHeader className="focus-priority-head">
+          <CardTitle className="card-title-with-icon">
+            <RiskIcon className="icon icon-18" aria-hidden="true" />
+            <span>Start Here</span>
+          </CardTitle>
+          <Button type="button" size="sm" variant="ghost" disabled={actionBusy} onClick={() => void pauseWorker()}>
+            <PauseIcon className="icon icon-16" aria-hidden="true" />
+            Pause Worker
+          </Button>
+        </CardHeader>
+        <CardContent className="focus-priority-body">
+          <div className="focus-kpis">
+            <span className="status-chip">Open issues: {riskCard?.needsDecisionCount ?? 0}</span>
+            <span className="status-chip">In progress: {nowCard?.activeRuns?.length ?? 0}</span>
+            <span className="status-chip">Urgent queue: {nowCard?.queuedCriticalCount ?? 0}</span>
+          </div>
+          {hasRisk ? (
+            <div className="focus-step">
+              <p className="focus-step-title">1. Resolve blockers before starting anything new.</p>
+              <p className="muted">You have {riskCard?.needsDecisionCount ?? 0} failed or blocked items.</p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={actionBusy}
+                onClick={() => pushMission('Review current failed and blocked items, then propose a triage plan')}
+              >
+                <PrioritizeIcon className="icon icon-16" aria-hidden="true" />
+                Triage Issues
+              </Button>
+            </div>
+          ) : topActiveRun ? (
+            <div className="focus-step">
+              <p className="focus-step-title">1. Keep current work moving.</p>
+              <p className="muted">{topActiveRun.objective}</p>
+            </div>
+          ) : topOpportunity ? (
+            <div className="focus-step">
+              <p className="focus-step-title">1. Run the best next opportunity.</p>
+              <p className="muted">{topOpportunity.title}</p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={actionBusy}
+                onClick={() => pushMission(`Run top candidate ${topOpportunity.id}: ${topOpportunity.title}`)}
+              >
+                <RunIcon className="icon icon-16" aria-hidden="true" />
+                Run Top Opportunity
+              </Button>
+            </div>
+          ) : (
+            <div className="focus-step">
+              <p className="focus-step-title">1. No immediate action needed.</p>
+              <p className="muted">The system is stable. Wait for the next task or send a mission from chat.</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="focus-grid">
       <Card>
         <CardHeader>
           <CardTitle className="card-title-with-icon">
             <NowIcon className="icon icon-18" aria-hidden="true" />
-            <span>What Is Happening Now</span>
+            <span>In Progress</span>
           </CardTitle>
-          <p className="muted">Live work currently running and urgent queue pressure.</p>
+          <p className="muted">Work currently running and queue pressure.</p>
         </CardHeader>
         <CardContent>
           <p className="metric-row">Worker mode: {nowCard?.modeSummary}</p>
-          <p className="metric-row">Urgent items waiting: {nowCard?.queuedCriticalCount ?? 0}</p>
           <div className="simple-list">
             {(nowCard?.activeRuns ?? []).length === 0 ? <p className="muted">No active jobs right now.</p> : null}
             {(nowCard?.activeRuns ?? []).map((run) => (
@@ -104,40 +169,15 @@ export function FocusPage() {
                 <span className="muted">{formatRunStatus(run.status)}</span>
               </div>
             ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="card-title-with-icon">
-            <RiskIcon className="icon icon-18" aria-hidden="true" />
-            <span>Needs Your Attention</span>
-          </CardTitle>
-          <p className="muted">Failures and blockers that can stall progress.</p>
-        </CardHeader>
-        <CardContent>
-          <p className="metric-row">Open issues needing triage: {riskCard?.needsDecisionCount ?? 0}</p>
-          <div className="simple-list">
-            {(riskCard?.failedLast24h ?? []).slice(0, 3).map((run) => (
-              <div key={run.id} className="simple-list-item">
-                <span>{run.objective}</span>
-                <span className="status-chip status-chip--failed">
-                  <FailedIcon className="icon icon-14" aria-hidden="true" />
-                  <span>failed</span>
-                </span>
-              </div>
-            ))}
             {(riskCard?.blockedTasks ?? []).slice(0, 2).map((task) => (
               <div key={task.id} className="simple-list-item">
                 <span>{task.title}</span>
                 <span className="status-chip status-chip--blocked">
                   <BlockedIcon className="icon icon-14" aria-hidden="true" />
-                  <span>blocked</span>
+                  <span>Blocked</span>
                 </span>
               </div>
             ))}
-            {(riskCard?.needsDecisionCount ?? 0) === 0 ? <p className="muted">No blockers or failures at the moment.</p> : null}
           </div>
         </CardContent>
       </Card>
@@ -146,9 +186,9 @@ export function FocusPage() {
         <CardHeader>
           <CardTitle className="card-title-with-icon">
             <NextIcon className="icon icon-18" aria-hidden="true" />
-            <span>Recommended Next Moves</span>
+            <span>Up Next</span>
           </CardTitle>
-          <p className="muted">Highest expected-value opportunities to run next.</p>
+          <p className="muted">Ranked opportunities to improve reliability and performance.</p>
         </CardHeader>
         <CardContent>
           <div className="simple-list">
@@ -180,19 +220,34 @@ export function FocusPage() {
                     <RunIcon className="icon icon-16" aria-hidden="true" />
                     Run
                   </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    disabled={actionBusy}
-                    onClick={() => void pauseWorker()}
-                  >
-                    <PauseIcon className="icon icon-16" aria-hidden="true" />
-                    Pause
-                  </Button>
                 </div>
               </div>
             ))}
+          </div>
+        </CardContent>
+      </Card>
+      </div>
+
+      <Card className="focus-risk-card">
+        <CardHeader>
+          <CardTitle className="card-title-with-icon">
+            <RiskIcon className="icon icon-18" aria-hidden="true" />
+            <span>Needs Your Attention</span>
+          </CardTitle>
+          <p className="muted">Failures from the last 24h.</p>
+        </CardHeader>
+        <CardContent>
+          <div className="simple-list">
+            {(riskCard?.failedLast24h ?? []).slice(0, 3).map((run) => (
+              <div key={run.id} className="simple-list-item">
+                <span>{run.objective}</span>
+                <span className="status-chip status-chip--failed">
+                  <FailedIcon className="icon icon-14" aria-hidden="true" />
+                  <span>Failed</span>
+                </span>
+              </div>
+            ))}
+            {(riskCard?.failedLast24h ?? []).length === 0 ? <p className="muted">No recent failures.</p> : null}
           </div>
         </CardContent>
       </Card>
