@@ -14,6 +14,40 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
+const SIMPLE_CHAT_PING_RE = /^(yo+|hey+|hi+|hello+|you there\??|are you there\??|ping\??|sup\??)$/i;
+
+const maybeFastChatReply = (requestText?: string): string | null => {
+  const text = (requestText ?? "").trim().replace(/\s+/g, " ");
+  if (!text) return null;
+  if (text.length > 80) return null;
+  if (SIMPLE_CHAT_PING_RE.test(text)) {
+    return "Yes, I'm here. What do you want to tackle?";
+  }
+  return null;
+};
+
+const normalizeChatSummary = (summary: string, requestText?: string): string => {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return "I’m here. What do you want to work on?";
+  }
+
+  if (/^prepared\b/i.test(trimmed)) {
+    const quoted = trimmed.match(/"([^"]{2,240})"/);
+    if (quoted?.[1]) {
+      return quoted[1];
+    }
+    const sentence = trimmed.replace(/^prepared[^:]*:\s*/i, "").trim();
+    if (sentence) return sentence;
+    const fallback = (requestText ?? "").trim();
+    if (SIMPLE_CHAT_PING_RE.test(fallback)) {
+      return "Yes, I'm here. What do you want to tackle?";
+    }
+  }
+
+  return trimmed;
+};
+
 export type WorkerTaskType =
   | "maintenance"
   | "chat_reply"
@@ -375,7 +409,7 @@ export class WorkerRuntime {
         let executionCwd = task.cwd ?? canonicalRepoPath;
         let lease: { cleanup(success: boolean): void; path: string } | null = null;
         let missionSucceeded = false;
-        if (this.worktrees && this.config.codexWorktreesEnabled) {
+        if (lane === "mission" && this.worktrees && this.config.codexWorktreesEnabled) {
           lease = this.worktrees.acquire(canonicalRepoPath, task.runId);
           executionCwd = lease.path;
         }
@@ -383,21 +417,39 @@ export class WorkerRuntime {
         const domain = task.domain ?? (lane === "chat" ? "chat" : "general");
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
         const objective = task.objective ?? task.title ?? (lane === "chat" ? "Answer user chat message" : "Execute codex mission");
-        const missionPack = buildMissionPack({
-          db: this.sqliteDb as never,
-          task,
-          repoPath: canonicalRepoPath,
-          objective,
-          tokenEnvelope,
-          retrievalBudgetTokens: this.config.retrievalBudgetTokens,
-          maxSkillsPerMission: this.config.maxSkillsPerMission,
-        });
-        const parsed = await this.codexHarness.run({
-          missionPack,
-          objectiveDetails: task.requestText ?? task.command ?? objective,
-          cwd: executionCwd,
-          model: task.model,
-        });
+        const fastReply = lane === "chat" ? maybeFastChatReply(task.requestText) : null;
+        const missionPack =
+          fastReply === null
+            ? buildMissionPack({
+                db: this.sqliteDb as never,
+                task,
+                repoPath: canonicalRepoPath,
+                objective,
+                tokenEnvelope,
+                retrievalBudgetTokens: this.config.retrievalBudgetTokens,
+                maxSkillsPerMission: this.config.maxSkillsPerMission,
+              })
+            : null;
+        const parsed =
+          fastReply !== null
+            ? {
+                payload: {
+                  status: "done" as const,
+                  summary: fastReply,
+                  actionsTaken: [{ kind: "analysis" as const, detail: "Fast-path chat response.", evidenceRefs: [] }],
+                  proposedChanges: { files: [], estimatedLoc: 0, risk: "low" as const },
+                  memoryProposals: [],
+                  nextSteps: [],
+                },
+                rawJson: fastReply,
+                contextHash: `${task.runId}:fast-chat`,
+              }
+            : await this.codexHarness.run({
+                missionPack: missionPack as NonNullable<typeof missionPack>,
+                objectiveDetails: task.requestText ?? task.command ?? objective,
+                cwd: executionCwd,
+                model: task.model,
+              });
         const memoryResult = this.memoryGovernor.commit(task.runId, parsed.payload.memoryProposals, "codex_harness");
         const finishedAt = this.now();
         const latencyMs = Math.max(0, finishedAt.getTime() - startedAt.getTime());
@@ -417,13 +469,13 @@ export class WorkerRuntime {
                 contextHash: parsed.contextHash,
                 domain,
                 retrieval: {
-                  queryId: missionPack.context.retrieval.queryId,
-                  intent: missionPack.context.retrieval.intent,
-                  usedTokens: missionPack.context.retrieval.usedTokens,
-                  budgetTokens: missionPack.context.retrieval.budgetTokens,
-                  evidenceRefs: missionPack.context.retrieval.evidenceRefs.slice(0, 20),
+                  queryId: missionPack?.context.retrieval.queryId ?? "",
+                  intent: missionPack?.context.retrieval.intent ?? "chat",
+                  usedTokens: missionPack?.context.retrieval.usedTokens ?? 0,
+                  budgetTokens: missionPack?.context.retrieval.budgetTokens ?? 0,
+                  evidenceRefs: (missionPack?.context.retrieval.evidenceRefs ?? []).slice(0, 20),
                 },
-                selectedSkills: missionPack.context.selectedSkills.map((skill) => ({
+                selectedSkills: (missionPack?.context.selectedSkills ?? []).map((skill) => ({
                   id: skill.id,
                   confidence: skill.confidence,
                   reason: skill.reason,
@@ -472,8 +524,9 @@ export class WorkerRuntime {
 
           if (task.conversationId) {
             const assistantMessageId = task.assistantMessageId ?? crypto.randomUUID();
-            const tokenInput = missionPack.context.retrieval.usedTokens;
-            const tokenOutput = Math.max(1, Math.ceil(parsed.payload.summary.length / 4));
+            const tokenInput = missionPack?.context.retrieval.usedTokens ?? 0;
+            const normalizedSummary = lane === "chat" ? normalizeChatSummary(parsed.payload.summary, task.requestText) : parsed.payload.summary;
+            const tokenOutput = Math.max(1, Math.ceil(normalizedSummary.length / 4));
             this.sqliteDb
               .query(
                 `INSERT INTO conversation_messages
@@ -494,10 +547,10 @@ export class WorkerRuntime {
                 assistantMessageId,
                 task.conversationId,
                 lane,
-                parsed.payload.summary,
+                normalizedSummary,
                 task.runId,
-                missionPack.context.retrieval.queryId,
-                JSON.stringify(missionPack.context.retrieval.evidenceRefs.slice(0, 20)),
+                missionPack?.context.retrieval.queryId ?? null,
+                JSON.stringify((missionPack?.context.retrieval.evidenceRefs ?? []).slice(0, 20)),
                 tokenInput,
                 tokenOutput,
                 latencyMs,
