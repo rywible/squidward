@@ -88,6 +88,10 @@ const parseCursor = (cursor?: string): { createdAt: string; id: string } | null 
 
 const toCursor = (createdAt: string, id: string): string => `${createdAt}|${id}`;
 
+const autoTitleFromMessage = (value: string): string => value.replace(/\s+/g, " ").trim().slice(0, 64);
+const shouldAutoRetitleConversation = (title: string): boolean =>
+  /^(new conversation|general|focus actions)$/i.test(title.trim());
+
 const clampLimit = (value: number | undefined, fallback: number, max: number): number => {
   if (!Number.isFinite(value ?? NaN)) return fallback;
   const bounded = Math.trunc(Number(value));
@@ -2046,6 +2050,9 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
         const userMessageId = crypto.randomUUID();
         const assistantMessageId = crypto.randomUUID();
         const runRowId = crypto.randomUUID();
+        const existingTitle = String(conversationRow.title ?? "");
+        const inferredTitle = autoTitleFromMessage(normalized);
+        const shouldRetitle = inferredTitle.length > 0 && shouldAutoRetitleConversation(existingTitle);
         await withDbWriteRetry(() => {
           db.exec("BEGIN IMMEDIATE TRANSACTION");
           try {
@@ -2064,11 +2071,19 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
                (id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`
             ).run(runRowId, input.conversationId, userMessageId, assistantMessageId, runId, lane, now, now);
-            db.query(
-              `UPDATE conversations
-               SET last_message_at=?, updated_at=?
-               WHERE id=?`
-            ).run(now, now, input.conversationId);
+            if (shouldRetitle) {
+              db.query(
+                `UPDATE conversations
+                 SET title=?, last_message_at=?, updated_at=?
+                 WHERE id=?`
+              ).run(inferredTitle, now, now, input.conversationId);
+            } else {
+              db.query(
+                `UPDATE conversations
+                 SET last_message_at=?, updated_at=?
+                 WHERE id=?`
+              ).run(now, now, input.conversationId);
+            }
             db.query(
               `INSERT INTO task_queue
                (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)

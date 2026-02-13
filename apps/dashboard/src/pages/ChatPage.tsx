@@ -48,32 +48,51 @@ export function ChatPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [search, setSearch] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const selectedConversationRef = useRef<string | null>(null);
+  const messageRequestSeqRef = useRef(0);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === conversationId) ?? null,
     [conversations, conversationId],
   );
 
-  const loadConversations = useCallback(async (keepSelection = true) => {
+  const filteredConversations = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return conversations;
+    return conversations.filter((conversation) =>
+      `${conversation.title} ${conversation.id}`.toLowerCase().includes(term),
+    );
+  }, [conversations, search]);
+
+  useEffect(() => {
+    selectedConversationRef.current = conversationId;
+  }, [conversationId]);
+
+  const loadConversations = useCallback(async (preferredConversationId?: string) => {
     const list = await dashboardApiClient.getConversations();
     setConversations(list.items);
-    if (!keepSelection && list.items.length > 0) {
-      setConversationId(list.items[0].id);
+
+    const selectedId = preferredConversationId ?? selectedConversationRef.current;
+    if (selectedId && list.items.some((item) => item.id === selectedId)) {
+      if (conversationId !== selectedId) {
+        setConversationId(selectedId);
+      }
       return;
     }
-    if (!conversationId && list.items.length > 0) {
-      setConversationId(list.items[0].id);
-      return;
-    }
-    if (conversationId && !list.items.find((item) => item.id === conversationId) && list.items.length > 0) {
+    if (!selectedId && list.items.length > 0) {
       setConversationId(list.items[0].id);
     }
   }, [conversationId]);
 
   const loadMessages = useCallback(async (targetConversationId: string) => {
+    const seq = messageRequestSeqRef.current + 1;
+    messageRequestSeqRef.current = seq;
     const detail = await dashboardApiClient.getConversation(targetConversationId);
+    if (messageRequestSeqRef.current !== seq) return;
+    if (selectedConversationRef.current !== targetConversationId) return;
     setMessages(detail.messages);
   }, []);
 
@@ -97,6 +116,7 @@ export function ChatPage() {
           setConversations(list.items);
           const initialId = list.items[0].id;
           setConversationId(initialId);
+          selectedConversationRef.current = initialId;
           const detail = await dashboardApiClient.getConversation(initialId);
           if (!mounted) return;
           setMessages(detail.messages);
@@ -112,7 +132,7 @@ export function ChatPage() {
     return () => {
       mounted = false;
     };
-  }, [loadConversations, loadMessages]);
+  }, [loadMessages]);
 
   useEffect(() => {
     if (!conversationId) return;
@@ -122,7 +142,7 @@ export function ChatPage() {
     }
     pollRef.current = setInterval(() => {
       void loadMessages(conversationId);
-      void loadConversations(true);
+      void loadConversations(conversationId);
     }, 1500);
     return () => {
       if (pollRef.current) {
@@ -142,8 +162,9 @@ export function ChatPage() {
     try {
       const title = titleFromMessage(composer);
       const created = await dashboardApiClient.createConversation(title || 'New conversation');
-      await loadConversations(true);
+      await loadConversations(created.id);
       setConversationId(created.id);
+      selectedConversationRef.current = created.id;
       const detail = await dashboardApiClient.getConversation(created.id);
       setMessages(detail.messages);
     } catch (createError) {
@@ -152,6 +173,7 @@ export function ChatPage() {
   };
 
   const onSelectConversation = async (id: string) => {
+    selectedConversationRef.current = id;
     setConversationId(id);
     setError(null);
     try {
@@ -205,7 +227,7 @@ export function ChatPage() {
         mode: resolvedMode,
       });
       await loadMessages(conversationId);
-      await loadConversations(true);
+      await loadConversations(conversationId);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : String(sendError));
     } finally {
@@ -261,7 +283,14 @@ export function ChatPage() {
           </Button>
         </CardHeader>
         <CardContent className="chat-conversation-list">
-          {conversations.map((conversation) => (
+          <input
+            className="chat-conversation-search"
+            placeholder="Search conversations"
+            value={search}
+            onChange={(event) => setSearch(event.currentTarget.value)}
+            aria-label="Search conversations"
+          />
+          {filteredConversations.map((conversation) => (
             <button
               key={conversation.id}
               className={`chat-conversation-item${conversation.id === conversationId ? ' active' : ''}`}
@@ -274,6 +303,7 @@ export function ChatPage() {
               </span>
             </button>
           ))}
+          {filteredConversations.length === 0 ? <p className="muted">No conversations match.</p> : null}
         </CardContent>
       </Card>
 

@@ -951,6 +951,22 @@ code {
   padding-right: 0.18rem;
 }
 
+.chat-conversation-search {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--fg-1);
+  border-radius: 0.7rem;
+  padding: 0.52rem 0.62rem;
+  font-size: 0.84rem;
+}
+
+.chat-conversation-search:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.42);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.2);
+}
+
 .chat-conversation-item {
   width: 100%;
   border: 1px solid var(--border-soft);

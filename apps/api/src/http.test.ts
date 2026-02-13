@@ -535,7 +535,7 @@ describe("api handler", () => {
       new Request("http://localhost/api/chat/conversations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "Perf tasks" }),
+        body: JSON.stringify({}),
       })
     );
     expect(createResponse.status).toBe(200);
@@ -565,7 +565,8 @@ describe("api handler", () => {
 
     const detailResponse = await handler(new Request(`http://localhost/api/chat/conversations/${created.id}`));
     expect(detailResponse.status).toBe(200);
-    const detail = (await detailResponse.json()) as { messages: Array<{ role: string }> };
+    const detail = (await detailResponse.json()) as { conversation: { title: string }; messages: Array<{ role: string }> };
     expect(detail.messages.length).toBeGreaterThanOrEqual(2);
+    expect(detail.conversation.title).toBe("Show upcoming tasks");
   });
 });
