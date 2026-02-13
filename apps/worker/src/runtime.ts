@@ -14,40 +14,6 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
-const SIMPLE_CHAT_PING_RE = /^(yo+|hey+|hi+|hello+|you there\??|are you there\??|ping\??|sup\??)$/i;
-
-const maybeFastChatReply = (requestText?: string): string | null => {
-  const text = (requestText ?? "").trim().replace(/\s+/g, " ");
-  if (!text) return null;
-  if (text.length > 80) return null;
-  if (SIMPLE_CHAT_PING_RE.test(text)) {
-    return "Yes, I'm here. What do you want to tackle?";
-  }
-  return null;
-};
-
-const normalizeChatSummary = (summary: string, requestText?: string): string => {
-  const trimmed = summary.trim();
-  if (!trimmed) {
-    return "I’m here. What do you want to work on?";
-  }
-
-  if (/^prepared\b/i.test(trimmed)) {
-    const quoted = trimmed.match(/"([^"]{2,240})"/);
-    if (quoted?.[1]) {
-      return quoted[1];
-    }
-    const sentence = trimmed.replace(/^prepared[^:]*:\s*/i, "").trim();
-    if (sentence) return sentence;
-    const fallback = (requestText ?? "").trim();
-    if (SIMPLE_CHAT_PING_RE.test(fallback)) {
-      return "Yes, I'm here. What do you want to tackle?";
-    }
-  }
-
-  return trimmed;
-};
-
 export type WorkerTaskType =
   | "maintenance"
   | "chat_reply"
@@ -417,35 +383,36 @@ export class WorkerRuntime {
         const domain = task.domain ?? (lane === "chat" ? "chat" : "general");
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
         const objective = task.objective ?? task.title ?? (lane === "chat" ? "Answer user chat message" : "Execute codex mission");
-        const fastReply = lane === "chat" ? maybeFastChatReply(task.requestText) : null;
-        const missionPack =
-          fastReply === null
-            ? buildMissionPack({
-                db: this.sqliteDb as never,
-                task,
-                repoPath: canonicalRepoPath,
-                objective,
-                tokenEnvelope,
-                retrievalBudgetTokens: this.config.retrievalBudgetTokens,
-                maxSkillsPerMission: this.config.maxSkillsPerMission,
-              })
-            : null;
+        const missionPack = buildMissionPack({
+          db: this.sqliteDb as never,
+          task,
+          repoPath: canonicalRepoPath,
+          objective,
+          tokenEnvelope,
+          retrievalBudgetTokens: this.config.retrievalBudgetTokens,
+          maxSkillsPerMission: this.config.maxSkillsPerMission,
+        });
         const parsed =
-          fastReply !== null
-            ? {
+          lane === "chat"
+            ? await this.codexHarness.runChatReply({
+                missionPack,
+                objectiveDetails: task.requestText ?? task.command ?? objective,
+                cwd: executionCwd,
+                model: task.model,
+              }).then((chat) => ({
                 payload: {
                   status: "done" as const,
-                  summary: fastReply,
-                  actionsTaken: [{ kind: "analysis" as const, detail: "Fast-path chat response.", evidenceRefs: [] }],
+                  summary: chat.text,
+                  actionsTaken: [{ kind: "analysis" as const, detail: "Responded to chat message.", evidenceRefs: [] }],
                   proposedChanges: { files: [], estimatedLoc: 0, risk: "low" as const },
                   memoryProposals: [],
                   nextSteps: [],
                 },
-                rawJson: fastReply,
-                contextHash: `${task.runId}:fast-chat`,
-              }
+                rawJson: chat.raw,
+                contextHash: chat.contextHash,
+              }))
             : await this.codexHarness.run({
-                missionPack: missionPack as NonNullable<typeof missionPack>,
+                missionPack,
                 objectiveDetails: task.requestText ?? task.command ?? objective,
                 cwd: executionCwd,
                 model: task.model,
@@ -524,8 +491,8 @@ export class WorkerRuntime {
 
           if (task.conversationId) {
             const assistantMessageId = task.assistantMessageId ?? crypto.randomUUID();
-            const tokenInput = missionPack?.context.retrieval.usedTokens ?? 0;
-            const normalizedSummary = lane === "chat" ? normalizeChatSummary(parsed.payload.summary, task.requestText) : parsed.payload.summary;
+            const tokenInput = missionPack.context.retrieval.usedTokens;
+            const normalizedSummary = parsed.payload.summary.trim().length > 0 ? parsed.payload.summary.trim() : "I could not generate a response.";
             const tokenOutput = Math.max(1, Math.ceil(normalizedSummary.length / 4));
             this.sqliteDb
               .query(
@@ -549,8 +516,8 @@ export class WorkerRuntime {
                 lane,
                 normalizedSummary,
                 task.runId,
-                missionPack?.context.retrieval.queryId ?? null,
-                JSON.stringify((missionPack?.context.retrieval.evidenceRefs ?? []).slice(0, 20)),
+                missionPack.context.retrieval.queryId,
+                JSON.stringify(missionPack.context.retrieval.evidenceRefs.slice(0, 20)),
                 tokenInput,
                 tokenOutput,
                 latencyMs,

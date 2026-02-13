@@ -55,6 +55,19 @@ export interface CodexHarnessRunInput {
   model?: string;
 }
 
+export interface CodexChatReplyInput {
+  missionPack: MissionPack;
+  objectiveDetails: string;
+  cwd: string;
+  model?: string;
+}
+
+export interface CodexChatReplyResult {
+  text: string;
+  raw: string;
+  contextHash: string;
+}
+
 export class CodexHarness {
   constructor(
     private readonly codex: CodexCliAdapter,
@@ -102,6 +115,34 @@ export class CodexHarness {
           return this.coercePayloadFromRaw(secondRaw);
         }
       }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  async runChatReply(input: CodexChatReplyInput): Promise<CodexChatReplyResult> {
+    const prompt = this.renderChatPrompt(input.missionPack, input.objectiveDetails);
+    const quoted = shellEscapeSingle(prompt);
+    const codexCmd = shellEscapeSingle(codexCliPath());
+    const tmp = mkdtempSync(join(tmpdir(), "sq-codex-chat-"));
+    try {
+      const promptFile = join(tmp, "chat-prompt.txt");
+      writeFileSync(promptFile, prompt, "utf8");
+      const promptFileQuoted = shellEscapeSingle(promptFile);
+      const candidates = [
+        `'${codexCmd}' exec --json '${quoted}'`,
+        `'${codexCmd}' exec --json "$(cat '${promptFileQuoted}')"`,
+        `'${codexCmd}' exec '${quoted}'`,
+      ];
+      const first = await this.runWithRetries(candidates, input.cwd, "first");
+      const raw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
+      const text = this.extractChatReplyText(raw);
+      this.recordUsageForPack(input.missionPack, input.model, prompt, raw, input.missionPack.cache.hit);
+      return {
+        text,
+        raw,
+        contextHash: createHash("sha256").update(raw).digest("hex"),
+      };
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -156,15 +197,128 @@ export class CodexHarness {
   }
 
   private recordUsage(input: CodexHarnessRunInput, prompt: string, output: string, cacheHit: boolean): void {
+    this.recordUsageForPack(input.missionPack, input.model, prompt, output, cacheHit);
+  }
+
+  private recordUsageForPack(
+    missionPack: MissionPack,
+    model: string | undefined,
+    prompt: string,
+    output: string,
+    cacheHit: boolean
+  ): void {
     recordTokenUsage(this.db, {
-      runId: input.missionPack.runId,
-      domain: input.missionPack.tokenEnvelope.domain,
-      model: input.model ?? "codex-cli",
-      inputTokens: Math.min(estimateTokens(prompt), input.missionPack.tokenEnvelope.maxInputTokens),
-      outputTokens: Math.min(estimateTokens(output), input.missionPack.tokenEnvelope.maxOutputTokens),
+      runId: missionPack.runId,
+      domain: missionPack.tokenEnvelope.domain,
+      model: model ?? "codex-cli",
+      inputTokens: Math.min(estimateTokens(prompt), missionPack.tokenEnvelope.maxInputTokens),
+      outputTokens: Math.min(estimateTokens(output), missionPack.tokenEnvelope.maxOutputTokens),
       cacheHit,
       costEstimate: 0,
     });
+  }
+
+  private renderChatPrompt(pack: MissionPack, objectiveDetails: string): string {
+    const skills =
+      pack.context.selectedSkills.length === 0
+        ? "- none"
+        : pack.context.selectedSkills.map((skill) => `- ${skill.title}: ${skill.reason}`).join("\n");
+    const canonical = pack.context.canonicalFacts.slice(0, 8).map((fact) => ({
+      key: fact.key,
+      value: fact.value,
+      source: fact.source,
+    }));
+    const repoFacts = pack.context.repoLearningFacts.slice(0, 8).map((fact) => ({
+      key: fact.key,
+      value: fact.value,
+      confidence: fact.confidence,
+    }));
+    const evidence = pack.context.evidenceSnippets.slice(0, 6).map((item) => ({
+      citation: item.citation,
+      text: item.text,
+    }));
+    const episodes = pack.context.recentEpisodes.slice(0, 4);
+
+    return [
+      "You are Squidward, a direct and helpful engineering manager assistant.",
+      "Reply to the user message in plain text only.",
+      "Do not mention draft/prepared/planning language.",
+      "Do not return JSON, markdown fences, or diagnostics.",
+      "Keep it concise unless the user asks for detail.",
+      "",
+      `Run id: ${pack.runId}`,
+      `Repo: ${pack.repoPath}`,
+      `Objective: ${pack.objective}`,
+      `User message: ${objectiveDetails}`,
+      "",
+      "Selected skills:",
+      skills,
+      "",
+      "Canonical memory:",
+      JSON.stringify(canonical),
+      "",
+      "Repo learning:",
+      JSON.stringify(repoFacts),
+      "",
+      "Recent episodes:",
+      JSON.stringify(episodes),
+      "",
+      "Evidence snippets:",
+      JSON.stringify(evidence),
+    ].join("\n");
+  }
+
+  private extractChatReplyText(raw: string): string {
+    try {
+      const tagged = parseCodexPayload(raw);
+      if (tagged.payload.summary.trim().length > 0) {
+        return tagged.payload.summary.trim();
+      }
+    } catch {
+      // Continue with line-level extraction for plain chat output.
+    }
+
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const agentMessages: string[] = [];
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line) as {
+          type?: string;
+          item?: { type?: string; text?: string };
+          text?: string;
+          output_text?: string;
+        };
+        if (parsed.type === "item.completed" && parsed.item?.type === "agent_message" && parsed.item.text) {
+          agentMessages.push(parsed.item.text.trim());
+          continue;
+        }
+        if (typeof parsed.output_text === "string" && parsed.output_text.trim().length > 0) {
+          agentMessages.push(parsed.output_text.trim());
+          continue;
+        }
+        if (typeof parsed.text === "string" && parsed.text.trim().length > 0) {
+          agentMessages.push(parsed.text.trim());
+        }
+      } catch {
+        // Ignore line-level parse failures and continue scanning.
+      }
+    }
+
+    if (agentMessages.length > 0) {
+      const last = agentMessages.at(-1);
+      if (last && last.length > 0) {
+        return last;
+      }
+    }
+
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) {
+      return trimmed.slice(0, 1200);
+    }
+    return "I ran into an issue responding. Try again.";
   }
 
   private coercePayloadFromRaw(raw: string): ParsedCodexPayload {

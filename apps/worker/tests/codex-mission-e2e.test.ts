@@ -136,4 +136,45 @@ describe("codex mission harness e2e", () => {
     expect(parsed.payload.status).toBe("blocked");
     expect(parsed.payload.summary.length).toBeGreaterThan(0);
   });
+
+  it("extracts plain chat text from codex streaming json events", async () => {
+    const db = new Database(":memory:");
+    migrate(db);
+    const runId = "run_chat_1";
+    db.query(
+      `INSERT INTO agent_runs
+       (id, trigger_type, objective, actions, outcome, rollback_flag, duration, created_at)
+       VALUES (?, 'manual', 'chat', '[]', 'running', 0, 0, datetime('now'))`
+    ).run(runId);
+
+    const streamOutput = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_1" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_0", type: "reasoning", text: "thinking" },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_1", type: "agent_message", text: "Yes, I'm here. How can I help?" },
+      }),
+      JSON.stringify({ type: "turn.completed" }),
+    ].join("\n");
+
+    const harness = new CodexHarness(new FixedOutputCodexAdapter(streamOutput), db);
+    const missionPack = buildMissionPack({
+      db,
+      task: { taskType: "chat_reply", runId, objective: "chat objective", requestText: "you there?" },
+      repoPath: "/Users/ryanwible/projects/wrela",
+      objective: "chat objective",
+      tokenEnvelope: buildTokenEnvelope(db, "chat"),
+    });
+
+    const result = await harness.runChatReply({
+      missionPack,
+      objectiveDetails: "you there?",
+      cwd: "/Users/ryanwible/projects/wrela",
+    });
+    expect(result.text).toBe("Yes, I'm here. How can I help?");
+  });
 });
