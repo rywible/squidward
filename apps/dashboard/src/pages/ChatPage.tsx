@@ -53,6 +53,7 @@ export function ChatPage() {
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const selectedConversationRef = useRef<string | null>(null);
   const messageRequestSeqRef = useRef(0);
+  const shouldStickToBottomRef = useRef(true);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === conversationId) ?? null,
@@ -136,6 +137,7 @@ export function ChatPage() {
 
   useEffect(() => {
     if (!conversationId) return;
+    shouldStickToBottomRef.current = true;
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -155,6 +157,7 @@ export function ChatPage() {
   useEffect(() => {
     const el = messageListRef.current;
     if (!el) return;
+    if (!shouldStickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [messages]);
 
@@ -188,6 +191,7 @@ export function ChatPage() {
     const content = composer.trim();
     const autoMission = /\b(run|execute|fix|implement|refactor|open pr|benchmark|investigate|ship|patch)\b/i.test(content);
     const resolvedMode = mode === 'auto' ? (autoMission ? 'mission' : 'chat') : mode;
+    shouldStickToBottomRef.current = true;
     setComposer('');
     setBusy(true);
     setError(null);
@@ -233,6 +237,13 @@ export function ChatPage() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const onMessageListScroll = () => {
+    const el = messageListRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    shouldStickToBottomRef.current = distanceFromBottom < 96;
   };
 
   const onSend = (event: FormEvent) => {
@@ -351,7 +362,7 @@ export function ChatPage() {
         </CardHeader>
 
         <CardContent className="chat-main-body">
-          <div ref={messageListRef} className="chat-message-list">
+          <div ref={messageListRef} className="chat-message-list" onScroll={onMessageListScroll}>
             {messages.length === 0 ? <p className="muted">No messages yet. Start the conversation.</p> : null}
             {messages.map((message) => (
               <article key={message.id} className={`chat-message chat-message--${message.role}`}>
