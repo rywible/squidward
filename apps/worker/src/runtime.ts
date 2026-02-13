@@ -13,6 +13,7 @@ import { buildMissionPack } from "./mission-pack";
 import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
+import { AutonomyOrchestrator, type AutonomyPlannerConfig } from "./autonomy-orchestrator";
 
 const sanitizeChatReplyOutput = (summary: string): string => {
   const trimmed = summary.trim();
@@ -49,7 +50,9 @@ export type WorkerTaskType =
   | "perf_generate_candidates"
   | "perf_run_candidate"
   | "perf_score_decide"
-  | "perf_open_draft_pr";
+  | "perf_open_draft_pr"
+  | "autonomy_mission_planner"
+  | "aps_readiness_check";
 
 export interface WorkerTaskPayload {
   taskType?: WorkerTaskType;
@@ -71,6 +74,11 @@ export interface WorkerTaskPayload {
   candidateId?: string;
   profile?: "smoke" | "standard" | "deep";
   triggerSource?: string;
+  autonomous?: boolean;
+  category?: "perf" | "bugfix";
+  expectedEvidence?: string[];
+  maxFiles?: number;
+  maxLoc?: number;
 }
 
 export interface WorkerRuntimeDeps {
@@ -98,6 +106,7 @@ export interface WorkerRuntimeDeps {
     maxTasksPerHeartbeat?: number;
     maxCodexSessions?: number;
     codexWorktreesEnabled?: boolean;
+    autonomy?: Partial<AutonomyPlannerConfig>;
     perfScientist?: Partial<PerfScientistConfig>;
   };
   now?: () => Date;
@@ -115,6 +124,7 @@ export class WorkerRuntime {
   private readonly memoryGovernor: MemoryGovernor | null;
   private readonly wrelaLearning: WrelaLearningService | null;
   private readonly worktrees: WorktreeManager | null;
+  private readonly autonomy: AutonomyOrchestrator | null;
   private readonly sqliteDb: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } | null;
   private readonly config: Required<NonNullable<WorkerRuntimeDeps["config"]>>;
   private readonly now: () => Date;
@@ -123,6 +133,8 @@ export class WorkerRuntime {
   private lastMemoAt = 0;
   private lastGraphAt = 0;
   private lastPerfBaselineAt = 0;
+  private lastAutonomyPlannerAt = 0;
+  private lastApsReadinessAt = 0;
 
   private mode: SchedulerMode = "idle";
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -156,12 +168,67 @@ export class WorkerRuntime {
       maxTasksPerHeartbeat: Math.max(1, Math.min(50, deps.config?.maxTasksPerHeartbeat ?? 8)),
       maxCodexSessions: Math.max(1, Math.min(16, deps.config?.maxCodexSessions ?? 4)),
       codexWorktreesEnabled: deps.config?.codexWorktreesEnabled ?? true,
+      autonomy: {
+        enabled: deps.config?.autonomy?.enabled ?? (process.env.AUTONOMY_ENABLED ?? "1") === "1",
+        scope:
+          deps.config?.autonomy?.scope ??
+          String(process.env.AUTONOMY_SCOPE ?? "perf,bugfix")
+            .split(",")
+            .map((part) => part.trim().toLowerCase())
+            .filter((part): part is "perf" | "bugfix" => part === "perf" || part === "bugfix"),
+        hourlyBudget: Math.max(0, Math.min(20, deps.config?.autonomy?.hourlyBudget ?? Number(process.env.AUTONOMY_HOURLY_BUDGET ?? 2))),
+        maxConcurrentMissions: Math.max(
+          1,
+          Math.min(8, deps.config?.autonomy?.maxConcurrentMissions ?? Number(process.env.AUTONOMY_MAX_CONCURRENT_MISSIONS ?? 2))
+        ),
+        minEv: Number(process.env.AUTONOMY_MIN_EV ?? deps.config?.autonomy?.minEv ?? 1.25),
+        requireLowRisk:
+          deps.config?.autonomy?.requireLowRisk ?? (process.env.AUTONOMY_REQUIRE_LOW_RISK ?? "1") !== "0",
+        maxAutoPrFiles: Math.max(
+          1,
+          Math.min(100, deps.config?.autonomy?.maxAutoPrFiles ?? Number(process.env.AUTONOMY_MAX_AUTO_PR_FILES ?? 8))
+        ),
+        maxAutoPrLoc: Math.max(
+          10,
+          Math.min(5000, deps.config?.autonomy?.maxAutoPrLoc ?? Number(process.env.AUTONOMY_MAX_AUTO_PR_LOC ?? 250))
+        ),
+        interactiveQueueBlockThreshold: Math.max(
+          1,
+          Math.min(
+            20,
+            deps.config?.autonomy?.interactiveQueueBlockThreshold ??
+              Number(process.env.AUTONOMY_INTERACTIVE_QUEUE_BLOCK_THRESHOLD ?? 4)
+          )
+        ),
+        primaryRepoPath: deps.config?.primaryRepoPath ?? process.cwd(),
+        perfRepoPath: deps.config?.perfScientist?.repoPath ?? process.env.PERF_SCIENTIST_REPO_PATH ?? process.cwd(),
+        perfManifestPath: deps.config?.perfScientist?.manifestPath ?? process.env.PERF_SCIENTIST_MANIFEST_PATH ?? "",
+      },
       perfScientist: {
         enabled: deps.config?.perfScientist?.enabled ?? false,
         nightlyHour: deps.config?.perfScientist?.nightlyHour ?? 2,
         smokeOnChange: deps.config?.perfScientist?.smokeOnChange ?? true,
       },
     };
+    this.autonomy = this.sqliteDb
+      ? new AutonomyOrchestrator(this.sqliteDb as never, (input) => this.queue.enqueue(input), {
+          enabled: this.config.autonomy.enabled ?? true,
+          scope:
+            this.config.autonomy.scope && this.config.autonomy.scope.length > 0
+              ? this.config.autonomy.scope
+              : ["perf", "bugfix"],
+          hourlyBudget: this.config.autonomy.hourlyBudget ?? 2,
+          maxConcurrentMissions: this.config.autonomy.maxConcurrentMissions ?? 2,
+          minEv: this.config.autonomy.minEv ?? 1.25,
+          requireLowRisk: this.config.autonomy.requireLowRisk ?? true,
+          maxAutoPrFiles: this.config.autonomy.maxAutoPrFiles ?? 8,
+          maxAutoPrLoc: this.config.autonomy.maxAutoPrLoc ?? 250,
+          interactiveQueueBlockThreshold: this.config.autonomy.interactiveQueueBlockThreshold ?? 4,
+          primaryRepoPath: this.config.autonomy.primaryRepoPath ?? this.config.primaryRepoPath,
+          perfRepoPath: this.config.autonomy.perfRepoPath ?? this.config.primaryRepoPath,
+          perfManifestPath: this.config.autonomy.perfManifestPath ?? "",
+        })
+      : null;
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -394,6 +461,17 @@ export class WorkerRuntime {
           throw new Error("codex_harness_not_configured");
         }
         const lane = taskType === "chat_reply" ? "chat" : "mission";
+        if (taskType === "codex_mission" && task.autonomous) {
+          if (!task.category || !["perf", "bugfix"].includes(task.category)) {
+            throw new Error("autonomy_missing_category");
+          }
+          if (!Array.isArray(task.expectedEvidence) || task.expectedEvidence.length === 0) {
+            throw new Error("autonomy_missing_expected_evidence");
+          }
+          if (!Number.isFinite(task.maxFiles) || !Number.isFinite(task.maxLoc)) {
+            throw new Error("autonomy_missing_diff_limits");
+          }
+        }
         const canonicalRepoPath = task.repoPath ?? this.config.primaryRepoPath;
         let executionCwd = task.cwd ?? canonicalRepoPath;
         let lease: { cleanup(success: boolean): void; path: string } | null = null;
@@ -406,11 +484,15 @@ export class WorkerRuntime {
         const domain = task.domain ?? (lane === "chat" ? "chat" : "general");
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
         const objective = task.objective ?? task.title ?? (lane === "chat" ? "Answer user chat message" : "Execute codex mission");
+        const guardrailSuffix =
+          task.autonomous && lane === "mission"
+            ? `\n\nAutonomy constraints:\n- Category: ${task.category}\n- Max files changed: ${task.maxFiles}\n- Max LOC changed: ${task.maxLoc}\n- Required evidence: ${(task.expectedEvidence ?? []).join(", ")}\n- Open draft PR only. Never merge/deploy.`
+            : "";
         const missionPack = buildMissionPack({
           db: this.sqliteDb as never,
           task,
           repoPath: canonicalRepoPath,
-          objective,
+          objective: `${objective}${guardrailSuffix}`,
           tokenEnvelope,
           retrievalBudgetTokens: this.config.retrievalBudgetTokens,
           maxSkillsPerMission: this.config.maxSkillsPerMission,
@@ -710,6 +792,17 @@ export class WorkerRuntime {
           throw new Error("missing_candidate_id");
         }
         await this.perfScientist.openDraftPr({ candidateId: task.candidateId, runId: task.runId });
+      } else if (taskType === "autonomy_mission_planner") {
+        if (!this.autonomy) {
+          throw new Error("autonomy_not_configured");
+        }
+        const interactivePending = await this.countQueuedByTaskTypes(["chat_reply", "codex_mission"], this.now());
+        await this.autonomy.planHourly(this.now(), interactivePending);
+      } else if (taskType === "aps_readiness_check") {
+        if (!this.autonomy) {
+          throw new Error("autonomy_not_configured");
+        }
+        await this.autonomy.checkApsReadiness(this.now());
       }
       await this.db.appendCommandAudit({
         id: crypto.randomUUID(),
@@ -881,5 +974,42 @@ export class WorkerRuntime {
         }
       }
     }
+
+    if (this.config.autonomy.enabled && this.autonomy && nowMs - this.lastApsReadinessAt >= 60 * 60 * 1000) {
+      await this.queue.enqueue({
+        dedupeKey: `aps_readiness_check:${truncateHourKey(now)}`,
+        priority: "P1",
+        payload: {
+          taskType: "aps_readiness_check",
+          runId: `run_aps_readiness_${nowMs}`,
+          title: "APS readiness check",
+        },
+      });
+      this.lastApsReadinessAt = nowMs;
+    }
+
+    if (
+      this.config.autonomy.enabled &&
+      this.autonomy &&
+      !backlogHigh &&
+      nowMs - this.lastAutonomyPlannerAt >= 60 * 60 * 1000
+    ) {
+      await this.queue.enqueue({
+        dedupeKey: `autonomy_mission_planner:${truncateHourKey(now)}`,
+        priority: "P1",
+        payload: {
+          taskType: "autonomy_mission_planner",
+          runId: `run_autonomy_plan_${nowMs}`,
+          title: "Autonomy hourly mission planner",
+        },
+      });
+      this.lastAutonomyPlannerAt = nowMs;
+    }
   }
 }
+
+const truncateHourKey = (now: Date): string => {
+  const d = new Date(now.getTime());
+  d.setMinutes(0, 0, 0);
+  return d.toISOString();
+};

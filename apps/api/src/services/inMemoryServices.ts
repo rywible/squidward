@@ -5,6 +5,9 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import type {
   ActionRequest,
   ActionResponse,
+  AutonomyDecision,
+  AutonomyFunnel,
+  AutonomyStatus,
   AuditEntry,
   BraveBudgetResponse,
   CtoMemo,
@@ -66,6 +69,10 @@ type SqlRecord = Record<string, unknown>;
 
 const monthKey = (): string => new Date().toISOString().slice(0, 7);
 const nowIso = (): string => new Date().toISOString();
+const asNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 
 const parseJsonObject = <T extends object>(value: unknown, fallback: T): T => {
   if (typeof value !== "string" || value.length === 0) {
@@ -192,6 +199,12 @@ const ensureSeed = (db: Database): void => {
       (id, provider, month, consumed_units, cap_units, alert_state, updated_at)
      VALUES ('brave_' || ?, 'brave', ?, 0, 2000, 'normal', ?)`
   ).run(currentMonth, currentMonth, now);
+
+  db.query(
+    `INSERT OR IGNORE INTO autonomy_settings
+     (id, enabled, hourly_budget, updated_at)
+     VALUES ('global', 1, 2, ?)`
+  ).run(now);
 
   const tokenBudgets: Array<{ domain: string; soft: number; hard: number }> = [
     { domain: "general", soft: 50000, hard: 100000 },
@@ -2196,6 +2209,229 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
           ).run(conversationId, compacted.summary, compacted.turns, now, now)
         );
         return { ok: true, summaryText: compacted.summary };
+      },
+    },
+
+    autonomy: {
+      async getFunnel(window: "24h" | "7d"): Promise<AutonomyFunnel> {
+        const sinceExpr = window === "7d" ? "datetime('now', '-7 day')" : "datetime('now', '-24 hour')";
+        const createdRow = db
+          .query(
+            `SELECT
+               (SELECT COUNT(*) FROM portfolio_candidates WHERE created_at >= ${sinceExpr}) +
+               (SELECT COUNT(*) FROM perf_candidates WHERE created_at >= ${sinceExpr}) AS count`
+          )
+          .get() as SqlRecord;
+        const scoredRow = db
+          .query(
+            `SELECT
+               (SELECT COUNT(DISTINCT candidate_id) FROM portfolio_scores WHERE scored_at >= ${sinceExpr}) +
+               (SELECT COUNT(DISTINCT candidate_id) FROM perf_decisions WHERE created_at >= ${sinceExpr}) AS count`
+          )
+          .get() as SqlRecord;
+        const eligibleRow = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM autonomy_decisions
+             WHERE created_at >= ${sinceExpr}
+               AND reason IN ('queued_for_execution', 'budget_exhausted')`
+          )
+          .get() as SqlRecord;
+        const queuedRow = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM autonomy_decisions
+             WHERE created_at >= ${sinceExpr}
+               AND decision='queued_for_execution'`
+          )
+          .get() as SqlRecord;
+        const startedRow = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM task_queue
+             WHERE task_type='codex_mission'
+               AND status IN ('running','completed')
+               AND created_at >= ${sinceExpr}
+               AND json_extract(payload_json, '$.payload.autonomous') = 1`
+          )
+          .get() as SqlRecord;
+        const completedRow = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM task_queue
+             WHERE task_type='codex_mission'
+               AND status='completed'
+               AND created_at >= ${sinceExpr}
+               AND json_extract(payload_json, '$.payload.autonomous') = 1`
+          )
+          .get() as SqlRecord;
+        const prOpenedRow = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM perf_decisions
+             WHERE decision='draft_pr_opened'
+               AND created_at >= ${sinceExpr}`
+          )
+          .get() as SqlRecord;
+        const dropoffsRows = db
+          .query(
+            `SELECT reason, COUNT(*) AS count, MAX(created_at) AS last_seen
+             FROM autonomy_decisions
+             WHERE created_at >= ${sinceExpr}
+               AND reason <> 'queued_for_execution'
+             GROUP BY reason
+             ORDER BY count DESC, last_seen DESC
+             LIMIT 10`
+          )
+          .all() as SqlRecord[];
+
+        return {
+          window,
+          generatedAt: nowIso(),
+          candidatesCreated: asNumber(createdRow.count, 0),
+          candidatesScored: asNumber(scoredRow.count, 0),
+          candidatesEligible: asNumber(eligibleRow.count, 0),
+          missionsQueued: asNumber(queuedRow.count, 0),
+          missionsStarted: asNumber(startedRow.count, 0),
+          missionsCompleted: asNumber(completedRow.count, 0),
+          draftPrOpened: asNumber(prOpenedRow.count, 0),
+          dropoffs: dropoffsRows.map((row) => ({
+            reason: String(row.reason),
+            count: asNumber(row.count, 0),
+            lastSeenAt: row.last_seen ? String(row.last_seen) : undefined,
+          })),
+        };
+      },
+      async listDecisions(cursor?: string, limit = 25): Promise<{ items: AutonomyDecision[]; nextCursor?: string }> {
+        const bounded = Math.max(1, Math.min(limit, 200));
+        const parsedCursor = parseCursor(cursor);
+        const values: Array<string | number> = [];
+        let where = "WHERE 1=1";
+        if (parsedCursor) {
+          where += " AND (created_at < ? OR (created_at = ? AND id < ?))";
+          values.push(parsedCursor.createdAt, parsedCursor.createdAt, parsedCursor.id);
+        }
+        values.push(bounded + 1);
+        const rows = db
+          .query(
+            `SELECT id, candidate_ref, source, decision, reason, ev, risk_class, budget_window, queued_task_id, created_at
+             FROM autonomy_decisions
+             ${where}
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`
+          )
+          .all(...values) as SqlRecord[];
+        const hasMore = rows.length > bounded;
+        const selected = hasMore ? rows.slice(0, bounded) : rows;
+        const items = selected.map((row): AutonomyDecision => ({
+          id: String(row.id),
+          candidateRef: String(row.candidate_ref),
+          source: String(row.source),
+          decision: String(row.decision),
+          reason: String(row.reason),
+          ev: asNumber(row.ev, 0),
+          riskClass: String(row.risk_class ?? "medium"),
+          budgetWindow: String(row.budget_window),
+          queuedTaskId: row.queued_task_id ? String(row.queued_task_id) : undefined,
+          createdAt: String(row.created_at),
+        }));
+        return {
+          items,
+          nextCursor:
+            hasMore && items.length > 0 ? toCursor(items[items.length - 1].createdAt, items[items.length - 1].id) : undefined,
+        };
+      },
+      async getStatus(): Promise<AutonomyStatus> {
+        const settings = db
+          .query(`SELECT enabled, hourly_budget FROM autonomy_settings WHERE id='global' LIMIT 1`)
+          .get() as SqlRecord | null;
+        const queued = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM task_queue
+             WHERE task_type='codex_mission'
+               AND status='queued'
+               AND json_extract(payload_json, '$.payload.autonomous') = 1`
+          )
+          .get() as SqlRecord;
+        const running = db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM task_queue
+             WHERE task_type='codex_mission'
+               AND status='running'
+               AND json_extract(payload_json, '$.payload.autonomous') = 1`
+          )
+          .get() as SqlRecord;
+        const lastPlanner = db
+          .query(`SELECT MAX(created_at) AS ts FROM autonomy_decisions`)
+          .get() as SqlRecord;
+        const lastReadiness = db
+          .query(
+            `SELECT reason, created_at
+             FROM autonomy_failures
+             WHERE stage='aps_readiness'
+             ORDER BY created_at DESC
+             LIMIT 1`
+          )
+          .get() as SqlRecord | null;
+
+        return {
+          enabled: asNumber(settings?.enabled, 1) === 1,
+          hourlyBudget: asNumber(settings?.hourly_budget, 2),
+          queuedMissions: asNumber(queued.count, 0),
+          runningMissions: asNumber(running.count, 0),
+          lastPlannerRunAt: lastPlanner.ts ? String(lastPlanner.ts) : undefined,
+          lastApsReadinessAt: lastReadiness?.created_at ? String(lastReadiness.created_at) : undefined,
+          lastApsReadinessReason: lastReadiness?.reason ? String(lastReadiness.reason) : undefined,
+        };
+      },
+      async action(
+        action: "run_planner_now" | "pause_autonomy" | "resume_autonomy" | "set_hourly_budget",
+        payload?: { hourlyBudget: number }
+      ): Promise<{ ok: boolean; message: string }> {
+        const now = nowIso();
+        db.query(
+          `INSERT OR IGNORE INTO autonomy_settings (id, enabled, hourly_budget, updated_at)
+           VALUES ('global', 1, 2, ?)`
+        ).run(now);
+
+        if (action === "pause_autonomy") {
+          db.query(`UPDATE autonomy_settings SET enabled=0, updated_at=? WHERE id='global'`).run(now);
+          return { ok: true, message: "autonomy_paused" };
+        }
+        if (action === "resume_autonomy") {
+          db.query(`UPDATE autonomy_settings SET enabled=1, updated_at=? WHERE id='global'`).run(now);
+          return { ok: true, message: "autonomy_resumed" };
+        }
+        if (action === "set_hourly_budget") {
+          const budget = Math.max(0, Math.min(20, asNumber(payload?.hourlyBudget, 2)));
+          db.query(`UPDATE autonomy_settings SET hourly_budget=?, updated_at=? WHERE id='global'`).run(budget, now);
+          return { ok: true, message: "autonomy_budget_updated" };
+        }
+
+        db.query(
+          `INSERT INTO task_queue
+           (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
+           VALUES (?, ?, 'autonomy_mission_planner', ?, 1, 'queued', ?, ?, ?)`
+        ).run(
+          crypto.randomUUID(),
+          `api_autonomy_${Date.now()}`,
+          JSON.stringify({
+            dedupeKey: `autonomy_mission_planner:manual:${Date.now()}`,
+            payload: {
+              taskType: "autonomy_mission_planner",
+              runId: `run_autonomy_manual_${Date.now()}`,
+              title: "Manual autonomy planner run",
+            },
+            coalescedCount: 0,
+            title: "Manual autonomy planner run",
+          }),
+          now,
+          now,
+          now
+        );
+        return { ok: true, message: "autonomy_planner_queued" };
       },
     },
 

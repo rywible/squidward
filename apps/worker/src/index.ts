@@ -106,8 +106,38 @@ const runtime = new WorkerRuntime({
     maxTasksPerHeartbeat: Number(process.env.MAX_TASKS_PER_HEARTBEAT ?? 8),
     maxCodexSessions: Number(process.env.MAX_CODEX_SESSIONS ?? 4),
     codexWorktreesEnabled: process.env.CODEX_WORKTREES_ENABLED !== "0",
+    autonomy: {
+      enabled: (process.env.AUTONOMY_ENABLED ?? "1") === "1",
+      scope: String(process.env.AUTONOMY_SCOPE ?? "perf,bugfix")
+        .split(",")
+        .map((part) => part.trim().toLowerCase())
+        .filter((part): part is "perf" | "bugfix" => part === "perf" || part === "bugfix"),
+      hourlyBudget: Number(process.env.AUTONOMY_HOURLY_BUDGET ?? 2),
+      maxConcurrentMissions: Number(process.env.AUTONOMY_MAX_CONCURRENT_MISSIONS ?? 2),
+      minEv: Number(process.env.AUTONOMY_MIN_EV ?? 1.25),
+      requireLowRisk: (process.env.AUTONOMY_REQUIRE_LOW_RISK ?? "1") !== "0",
+      maxAutoPrFiles: Number(process.env.AUTONOMY_MAX_AUTO_PR_FILES ?? 8),
+      maxAutoPrLoc: Number(process.env.AUTONOMY_MAX_AUTO_PR_LOC ?? 250),
+      interactiveQueueBlockThreshold: Number(process.env.AUTONOMY_INTERACTIVE_QUEUE_BLOCK_THRESHOLD ?? 4),
+      primaryRepoPath:
+        process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
+      perfRepoPath:
+        process.env.PERF_SCIENTIST_REPO_PATH ??
+        process.env.PRIMARY_REPO_PATH ??
+        resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
+      perfManifestPath:
+        process.env.PERF_SCIENTIST_MANIFEST_PATH ??
+        resolve(process.env.HOME ?? process.cwd(), "projects/wrela/benchmarks/macro/bench.toml"),
+    },
     perfScientist: {
       enabled: process.env.PERF_SCIENTIST_ENABLED === "1",
+      repoPath:
+        process.env.PERF_SCIENTIST_REPO_PATH ??
+        process.env.PRIMARY_REPO_PATH ??
+        resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
+      manifestPath:
+        process.env.PERF_SCIENTIST_MANIFEST_PATH ??
+        resolve(process.env.HOME ?? process.cwd(), "projects/wrela/benchmarks/macro/bench.toml"),
       nightlyHour: Number(process.env.PERF_SCIENTIST_NIGHTLY_HOUR ?? 2),
       smokeOnChange: process.env.PERF_SCIENTIST_SMOKE_ON_CHANGE !== "0",
     },

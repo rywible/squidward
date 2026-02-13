@@ -365,6 +365,48 @@ export interface TokenUsageItem {
   createdAt: string;
 }
 
+export interface AutonomyDropoffReason {
+  reason: string;
+  count: number;
+  lastSeenAt?: string;
+}
+
+export interface AutonomyFunnel {
+  window: '24h' | '7d';
+  generatedAt: string;
+  candidatesCreated: number;
+  candidatesScored: number;
+  candidatesEligible: number;
+  missionsQueued: number;
+  missionsStarted: number;
+  missionsCompleted: number;
+  draftPrOpened: number;
+  dropoffs: AutonomyDropoffReason[];
+}
+
+export interface AutonomyDecision {
+  id: string;
+  candidateRef: string;
+  source: string;
+  decision: string;
+  reason: string;
+  ev: number;
+  riskClass: string;
+  budgetWindow: string;
+  queuedTaskId?: string;
+  createdAt: string;
+}
+
+export interface AutonomyStatus {
+  enabled: boolean;
+  hourlyBudget: number;
+  queuedMissions: number;
+  runningMissions: number;
+  lastPlannerRunAt?: string;
+  lastApsReadinessAt?: string;
+  lastApsReadinessReason?: string;
+}
+
 export interface RetrievalStatus {
   enabled: boolean;
   lastQueryAt?: string;

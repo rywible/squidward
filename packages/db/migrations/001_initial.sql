@@ -919,3 +919,60 @@ CREATE TABLE IF NOT EXISTS retrieval_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_query_created
 ON retrieval_feedback(query_id, created_at DESC);
+
+-- Autonomy Upgrade v1: hourly draft-PR autopilot control plane.
+CREATE TABLE IF NOT EXISTS autonomy_settings (
+  id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  hourly_budget INTEGER NOT NULL DEFAULT 2,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_windows (
+  id TEXT PRIMARY KEY,
+  window_start TEXT NOT NULL,
+  window_end TEXT NOT NULL,
+  budget INTEGER NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomy_windows_start
+ON autonomy_windows(window_start);
+
+CREATE TABLE IF NOT EXISTS autonomy_decisions (
+  id TEXT PRIMARY KEY,
+  candidate_ref TEXT NOT NULL,
+  source TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  ev REAL NOT NULL DEFAULT 0,
+  risk_class TEXT NOT NULL DEFAULT 'medium',
+  budget_window TEXT NOT NULL,
+  queued_task_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (queued_task_id) REFERENCES task_queue(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_created
+ON autonomy_decisions(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_decision
+ON autonomy_decisions(decision, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_reason
+ON autonomy_decisions(reason, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_candidate_ref
+ON autonomy_decisions(candidate_ref, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_failures (
+  id TEXT PRIMARY KEY,
+  stage TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_failures_created
+ON autonomy_failures(created_at DESC);

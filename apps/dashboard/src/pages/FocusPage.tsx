@@ -4,7 +4,14 @@ import { PageState } from '../components/PageState';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { usePollingQuery } from '../hooks/usePollingQuery';
-import type { CockpitSnapshot, PortfolioCandidate, QueueTask, RunSummary } from '../types/dashboard';
+import type {
+  AutonomyFunnel,
+  AutonomyStatus,
+  CockpitSnapshot,
+  PortfolioCandidate,
+  QueueTask,
+  RunSummary,
+} from '../types/dashboard';
 import { buildFocusNextCard, buildFocusNowCard, buildFocusRiskCard } from './focus-model';
 import { appIcons } from '../lib/icons';
 
@@ -13,16 +20,20 @@ interface FocusPayload {
   runs: RunSummary[];
   queue: QueueTask[];
   portfolio: PortfolioCandidate[];
+  autonomyFunnel: AutonomyFunnel;
+  autonomyStatus: AutonomyStatus;
 }
 
 const fetchFocusPayload = async (signal: AbortSignal): Promise<FocusPayload> => {
-  const [cockpit, runs, queue, portfolio] = await Promise.all([
+  const [cockpit, runs, queue, portfolio, autonomyFunnel, autonomyStatus] = await Promise.all([
     dashboardApiClient.getCockpit(signal),
     dashboardApiClient.getRuns(signal),
     dashboardApiClient.getQueue(signal),
     dashboardApiClient.getPortfolioTop(3),
+    dashboardApiClient.getAutonomyFunnel('24h'),
+    dashboardApiClient.getAutonomyStatus(),
   ]);
-  return { cockpit, runs, queue, portfolio };
+  return { cockpit, runs, queue, portfolio, autonomyFunnel, autonomyStatus };
 };
 
 const formatRunStatus = (status: RunSummary['status']): string => {
@@ -43,6 +54,7 @@ export function FocusPage() {
   const PauseIcon = appIcons.pause;
   const FailedIcon = appIcons.failed;
   const BlockedIcon = appIcons.blocked;
+  const ActivityIcon = appIcons.now;
 
   const { data, loading, error, refreshing, refresh } = usePollingQuery(fetchFocusPayload, 5000);
   const [actionBusy, setActionBusy] = useState(false);
@@ -248,6 +260,37 @@ export function FocusPage() {
               </div>
             ))}
             {(riskCard?.failedLast24h ?? []).length === 0 ? <p className="muted">No recent failures.</p> : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="focus-risk-card">
+        <CardHeader>
+          <CardTitle className="card-title-with-icon">
+            <ActivityIcon className="icon icon-18" aria-hidden="true" />
+            <span>Autonomy Funnel (24h)</span>
+          </CardTitle>
+          <p className="muted">
+            {data.autonomyStatus.enabled ? 'Autonomy enabled' : 'Autonomy paused'} · hourly budget {data.autonomyStatus.hourlyBudget}
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="simple-list">
+            <div className="simple-list-item"><span>Created</span><span className="muted">{data.autonomyFunnel.candidatesCreated}</span></div>
+            <div className="simple-list-item"><span>Eligible</span><span className="muted">{data.autonomyFunnel.candidatesEligible}</span></div>
+            <div className="simple-list-item"><span>Missions queued</span><span className="muted">{data.autonomyFunnel.missionsQueued}</span></div>
+            <div className="simple-list-item"><span>Missions completed</span><span className="muted">{data.autonomyFunnel.missionsCompleted}</span></div>
+            <div className="simple-list-item"><span>Draft PR opened</span><span className="muted">{data.autonomyFunnel.draftPrOpened}</span></div>
+          </div>
+          <p className="muted" style={{ marginTop: '0.75rem' }}>Why not actioning?</p>
+          <div className="simple-list">
+            {data.autonomyFunnel.dropoffs.slice(0, 3).map((item) => (
+              <div key={`${item.reason}:${item.lastSeenAt ?? ''}`} className="simple-list-item">
+                <span>{item.reason}</span>
+                <span className="muted">{item.count}</span>
+              </div>
+            ))}
+            {data.autonomyFunnel.dropoffs.length === 0 ? <p className="muted">No recent drop-offs.</p> : null}
           </div>
         </CardContent>
       </Card>

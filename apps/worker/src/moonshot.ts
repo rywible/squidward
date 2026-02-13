@@ -178,10 +178,9 @@ export class MoonshotEngine {
       const lowRisk = candidate.riskClass === "low";
       const withinTop = selected < topN;
       const canAutoQueue = lowRisk && score.ev >= minEvAutorun && withinTop;
-      const decision: PortfolioDecision = "advisory";
+      const decision: PortfolioDecision = canAutoQueue ? "queued_draft" : "advisory";
       let queuedTaskId: string | null = null;
       if (canAutoQueue) {
-        // Portfolio ranker remains advisory in v1.5 to avoid self-amplifying internal queue loops.
         selected += 1;
       }
 
@@ -196,7 +195,7 @@ export class MoonshotEngine {
           scoreId,
           decision,
           minEvAutorun,
-          canAutoQueue ? "low_risk_ev_threshold_advisory_only" : "advisory_or_below_threshold",
+          canAutoQueue ? "low_risk_ev_threshold_eligible_for_autonomy" : "advisory_or_below_threshold",
           queuedTaskId,
           isoNow()
         );

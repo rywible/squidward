@@ -1,6 +1,10 @@
 import type {
   ActionRequest,
   ActionResponse,
+  AutonomyBudgetConfig,
+  AutonomyDecision,
+  AutonomyFunnel,
+  AutonomyStatus,
   AuditEntry,
   BraveBudgetResponse,
   CtoMemo,
@@ -211,6 +215,16 @@ export interface ChatService {
   compactConversation(conversationId: string): Promise<{ ok: boolean; summaryText: string }>;
 }
 
+export interface AutonomyService {
+  getFunnel(window: "24h" | "7d"): Promise<AutonomyFunnel>;
+  listDecisions(cursor?: string, limit?: number): Promise<{ items: AutonomyDecision[]; nextCursor?: string }>;
+  getStatus(): Promise<AutonomyStatus>;
+  action(
+    action: "run_planner_now" | "pause_autonomy" | "resume_autonomy" | "set_hourly_budget",
+    payload?: AutonomyBudgetConfig
+  ): Promise<{ ok: boolean; message: string }>;
+}
+
 export interface Services {
   dashboard: DashboardService;
   runs: RunsService;
@@ -231,4 +245,5 @@ export interface Services {
   tokenEconomy: TokenEconomyService;
   retrieval: RetrievalService;
   chat: ChatService;
+  autonomy: AutonomyService;
 }

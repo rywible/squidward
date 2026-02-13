@@ -1,5 +1,8 @@
 import type {
   ActionResult,
+  AutonomyDecision,
+  AutonomyFunnel,
+  AutonomyStatus,
   AuditEntry,
   CtoMemo,
   Conversation,
@@ -90,6 +93,21 @@ export class DashboardApiClient {
 
   async getPortfolioTop(limit = 5): Promise<PortfolioCandidate[]> {
     return this.get<PortfolioCandidate[]>(`/portfolio/top?limit=${limit}`);
+  }
+
+  async getAutonomyFunnel(window: '24h' | '7d' = '24h'): Promise<AutonomyFunnel> {
+    return this.get<AutonomyFunnel>(`/autonomy/funnel?window=${window}`);
+  }
+
+  async getAutonomyStatus(): Promise<AutonomyStatus> {
+    return this.get<AutonomyStatus>('/autonomy/status');
+  }
+
+  async getAutonomyDecisions(cursor?: string, limit = 25): Promise<{ items: AutonomyDecision[]; nextCursor?: string }> {
+    const search = new URLSearchParams();
+    search.set('limit', String(limit));
+    if (cursor) search.set('cursor', cursor);
+    return this.get<{ items: AutonomyDecision[]; nextCursor?: string }>(`/autonomy/decisions?${search.toString()}`);
   }
 
   async getPortfolioHistory(cursor?: string, limit = 25): Promise<PortfolioHistoryResponse> {

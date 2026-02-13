@@ -229,6 +229,32 @@ export const createHandler = (options?: HandlerOptions) => {
       )
     );
   }
+  if (req.method === "GET" && pathname === "/api/autonomy/funnel") {
+    const windowParam = (url.searchParams.get("window") ?? "24h") as "24h" | "7d";
+    const normalizedWindow = windowParam === "7d" ? "7d" : "24h";
+    return json(await services.autonomy.getFunnel(normalizedWindow));
+  }
+  if (req.method === "GET" && pathname === "/api/autonomy/decisions") {
+    return json(
+      await services.autonomy.listDecisions(
+        url.searchParams.get("cursor") ?? undefined,
+        parseLimitParam(url, "limit", 25, 1, 200)
+      )
+    );
+  }
+  if (req.method === "GET" && pathname === "/api/autonomy/status") {
+    return json(await services.autonomy.getStatus());
+  }
+  if (req.method === "POST" && pathname === "/api/autonomy/actions") {
+    const body = req.headers.get("content-type")?.includes("application/json")
+      ? ((await req.json()) as {
+          action?: "run_planner_now" | "pause_autonomy" | "resume_autonomy" | "set_hourly_budget";
+          hourlyBudget?: number;
+        })
+      : {};
+    const action = body.action ?? "run_planner_now";
+    return json(await services.autonomy.action(action, { hourlyBudget: body.hourlyBudget ?? 2 }));
+  }
   if (req.method === "GET" && pathname === "/api/tests/evolution/stats") {
     return json(await services.testEvolution.getStats());
   }

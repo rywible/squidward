@@ -258,6 +258,16 @@ describe("api handler", () => {
        VALUES ('dec_1', 'score_1', 'advisory', 'balanced', 1.25, 'seed', datetime('now'))`
     ).run();
     db.query(
+      `INSERT INTO autonomy_settings
+       (id, enabled, hourly_budget, updated_at)
+       VALUES ('global', 1, 2, datetime('now'))`
+    ).run();
+    db.query(
+      `INSERT INTO autonomy_decisions
+       (id, candidate_ref, source, decision, reason, ev, risk_class, budget_window, queued_task_id, created_at)
+       VALUES ('auto_dec_1', 'portfolio:cand_1', 'portfolio', 'queued_for_execution', 'queued_for_execution', 6.4, 'low', datetime('now'), NULL, datetime('now'))`
+    ).run();
+    db.query(
       `INSERT INTO test_candidates
        (id, bug_ref, language, framework, test_path, test_code, status, score, validation_notes, created_at, updated_at)
        VALUES ('tc_1', 'incident:inc_1', 'typescript', 'vitest', 'tests/a.test.ts', 'it()', 'accepted', 0.9, 'ok', datetime('now'), datetime('now'))`
@@ -396,6 +406,13 @@ describe("api handler", () => {
 
     const portfolioHistory = await handler(new Request("http://localhost/api/portfolio/history"));
     expect(portfolioHistory.status).toBe(200);
+
+    const autonomyFunnel = await handler(new Request("http://localhost/api/autonomy/funnel?window=24h"));
+    expect(autonomyFunnel.status).toBe(200);
+    const autonomyStatus = await handler(new Request("http://localhost/api/autonomy/status"));
+    expect(autonomyStatus.status).toBe(200);
+    const autonomyDecisions = await handler(new Request("http://localhost/api/autonomy/decisions?limit=5"));
+    expect(autonomyDecisions.status).toBe(200);
 
     const testStats = await handler(new Request("http://localhost/api/tests/evolution/stats"));
     expect(testStats.status).toBe(200);

@@ -38,6 +38,10 @@ describe("MoonshotEngine", () => {
     const decisionCount = db.query("SELECT COUNT(*) AS count FROM portfolio_decisions").get() as { count: number };
     expect(Number(scoreCount.count)).toBeGreaterThan(0);
     expect(Number(decisionCount.count)).toBeGreaterThan(0);
+    const latestDecision = db
+      .query(`SELECT decision FROM portfolio_decisions ORDER BY created_at DESC LIMIT 1`)
+      .get() as { decision: string } | null;
+    expect(latestDecision?.decision).toBe("queued_draft");
   });
 
   it("builds graph snapshot and returns impact report", () => {
