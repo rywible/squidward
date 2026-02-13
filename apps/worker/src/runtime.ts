@@ -169,6 +169,7 @@ export class WorkerRuntime {
     if (this.started) {
       return;
     }
+    this.recoverStaleRunningQueueItems();
     this.started = true;
     await this.heartbeat();
   }
@@ -574,11 +575,6 @@ export class WorkerRuntime {
               .run(finishedAt.toISOString(), finishedAt.toISOString(), task.conversationId);
           }
         }
-        this.wrelaLearning?.ingestRun(
-          task.runId,
-          parsed.payload.status === "done" ? "success" : "failed",
-          objective
-        );
         missionSucceeded = true;
         } finally {
           if (lease) {
@@ -725,6 +721,7 @@ export class WorkerRuntime {
         exitCode: 0,
         artifactRefs: [`taskType=${taskType}`],
       });
+      this.wrelaLearning?.ingestRun(task.runId, "success", task.objective ?? task.title ?? taskType);
     } catch (error) {
       if (this.sqliteDb && task.conversationId) {
         const failedAt = this.now().toISOString();
@@ -755,7 +752,27 @@ export class WorkerRuntime {
         exitCode: 1,
         artifactRefs: [String(error)],
       });
+      this.wrelaLearning?.ingestRun(task.runId, "failed", task.objective ?? task.title ?? taskType);
       throw error;
+    }
+  }
+
+  private recoverStaleRunningQueueItems(): void {
+    if (!this.sqliteDb) {
+      return;
+    }
+    try {
+      this.sqliteDb
+        .query(
+          `UPDATE task_queue
+           SET status='failed',
+               last_error='recovered_stale_running',
+               updated_at=?
+           WHERE status='running'`
+        )
+        .run(this.now().toISOString());
+    } catch (error) {
+      console.error("[worker] failed to recover stale running queue rows:", error);
     }
   }
 
