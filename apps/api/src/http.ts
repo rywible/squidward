@@ -1,7 +1,5 @@
-import { createHmac } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve } from "node:path";
-import { Database } from "@squidward/db";
 import { file } from "bun";
 
 import { createIntegrationsService, type CommandRunner, type FetchLike } from "./integrations";
@@ -32,6 +30,15 @@ const json = (body: unknown, status = 200): Response =>
     },
   });
 
+const unauthorized = (): Response =>
+  new Response("Unauthorized", {
+    status: 401,
+    headers: {
+      "www-authenticate": 'Basic realm="squidward", charset="UTF-8"',
+      "cache-control": "no-store",
+    },
+  });
+
 const extractActionRequest = async (req: Request): Promise<ActionRequest> => {
   if (!req.headers.get("content-type")?.includes("application/json")) {
     return {};
@@ -57,22 +64,40 @@ const timingSafeEquals = (a: string, b: string): boolean => {
   return mismatch === 0;
 };
 
-const verifySlackSignature = (body: string, ts: string, signature: string, secret?: string): boolean => {
-  if (!secret) {
-    return false;
+const decodeBasicAuth = (headerValue: string): { username: string; password: string } | null => {
+  if (!headerValue.toLowerCase().startsWith("basic ")) return null;
+  const encoded = headerValue.slice(6).trim();
+  if (!encoded) return null;
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    const sep = decoded.indexOf(":");
+    if (sep < 0) return null;
+    return {
+      username: decoded.slice(0, sep),
+      password: decoded.slice(sep + 1),
+    };
+  } catch {
+    return null;
   }
-  const tsSeconds = Number(ts);
-  if (!Number.isFinite(tsSeconds)) {
-    return false;
-  }
-  const driftSeconds = Math.abs(Math.floor(Date.now() / 1000) - Math.floor(tsSeconds));
-  if (driftSeconds > 300) {
-    return false;
-  }
+};
 
-  const raw = `v0:${ts}:${body}`;
-  const expected = `v0=${createHmac("sha256", secret).update(raw).digest("hex")}`;
-  return timingSafeEquals(expected, signature);
+const shouldBypassWebAuth = (pathname: string): boolean =>
+  pathname === "/healthz" || pathname === "/readyz";
+
+const isAuthorizedWebRequest = (
+  req: Request,
+  env: Record<string, string | undefined>,
+  pathname: string
+): boolean => {
+  const requiredPassword = env.WEB_PASSWORD?.trim();
+  if (!requiredPassword) return true;
+  if (shouldBypassWebAuth(pathname)) return true;
+  const expectedUser = (env.WEB_USERNAME?.trim() || "admin").trim();
+  const auth = req.headers.get("authorization");
+  if (!auth) return false;
+  const parsed = decodeBasicAuth(auth);
+  if (!parsed) return false;
+  return timingSafeEquals(parsed.username, expectedUser) && timingSafeEquals(parsed.password, requiredPassword);
 };
 
 const dashboardDistDir = process.env.DASHBOARD_DIST_DIR
@@ -107,20 +132,6 @@ const healthResponse = (): HealthResponse => ({
   ok: true,
   now: new Date().toISOString(),
 });
-
-const parseRetrievalFeedbackCommand = (
-  text: string
-): { queryId: string; feedbackType: "helpful" | "missed-context" | "wrong-priority"; notes?: string } | null => {
-  const match = text
-    .trim()
-    .match(/^\/?(?:retrieval\s+)?(?:feedback|fb)\s+([a-zA-Z0-9_-]{8,})\s+(helpful|missed-context|wrong-priority)(?:\s+(.+))?$/i);
-  if (!match) return null;
-  return {
-    queryId: match[1],
-    feedbackType: match[2].toLowerCase() as "helpful" | "missed-context" | "wrong-priority",
-    notes: match[3]?.trim(),
-  };
-};
 
 const parseLimitParam = (
   url: URL,
@@ -170,121 +181,16 @@ export const createHandler = (options?: HandlerOptions) => {
     const url = new URL(req.url);
     const { pathname } = url;
 
+    if (!isAuthorizedWebRequest(req, env, pathname)) {
+      return unauthorized();
+    }
+
   if (req.method === "GET" && pathname === "/healthz") {
     return json(healthResponse());
   }
 
   if (req.method === "GET" && pathname === "/readyz") {
     return json(healthResponse());
-  }
-
-  if (req.method === "POST" && pathname === "/slack/events") {
-    const body = await req.text();
-    const ts = req.headers.get("x-slack-request-timestamp") ?? "";
-    const signature = req.headers.get("x-slack-signature") ?? "";
-
-    const verified = verifySlackSignature(body, ts, signature, env.SLACK_SIGNING_SECRET);
-    if (!verified) {
-      return json({ ok: false, error: "invalid_signature" }, 401);
-    }
-
-    let payload: Record<string, unknown> = {};
-    try {
-      payload = body ? (JSON.parse(body) as Record<string, unknown>) : {};
-    } catch {
-      return json({ ok: false, error: "invalid_json" }, 400);
-    }
-
-    if (payload.type === "url_verification" && typeof payload.challenge === "string") {
-      return json({ challenge: payload.challenge });
-    }
-
-    const event = payload.event && typeof payload.event === "object" ? (payload.event as Record<string, unknown>) : null;
-    const eventType = event?.type ? String(event.type) : "";
-    const subtype = event?.subtype ? String(event.subtype) : "";
-    const channel = event?.channel ? String(event.channel) : "";
-    const text = event?.text ? String(event.text) : "";
-    const eventTs = event?.ts ? String(event.ts) : undefined;
-    const isActionableMessage = eventType === "message" && subtype !== "bot_message";
-    const isActionableMention = eventType === "app_mention";
-    if ((isActionableMessage || isActionableMention) && channel && text.trim().length > 0) {
-      const normalizedText = text.replace(/<@[A-Z0-9]+>/g, "").trim() || text.trim();
-      const db = new Database(dbPath, { create: true, strict: false });
-      const now = new Date().toISOString();
-      const retrievalFeedback = parseRetrievalFeedbackCommand(normalizedText);
-      if (retrievalFeedback) {
-        const queryExists = db
-          .query(`SELECT id FROM retrieval_queries WHERE id=? LIMIT 1`)
-          .get(retrievalFeedback.queryId) as Record<string, unknown> | null;
-        if (!queryExists) {
-          db.close();
-          return json(
-            {
-              ok: true,
-              accepted: true,
-              feedbackRecorded: false,
-              reason: "unknown_query_id",
-              receivedAt: new Date().toISOString(),
-            },
-            202
-          );
-        }
-        db.query(
-          `INSERT INTO retrieval_feedback
-           (id, query_id, run_id, feedback_type, notes, created_at)
-           VALUES (?, ?, NULL, ?, ?, ?)`
-        ).run(
-          crypto.randomUUID(),
-          retrievalFeedback.queryId,
-          retrievalFeedback.feedbackType,
-          retrievalFeedback.notes ?? null,
-          now
-        );
-        db.close();
-        return json(
-          {
-            ok: true,
-            accepted: true,
-            feedbackRecorded: true,
-            receivedAt: new Date().toISOString(),
-          },
-          202
-        );
-      }
-      const runId = `run_slack_${Date.now()}`;
-      const dedupeKey = `slack:${channel}:${eventTs ?? Date.now()}`;
-      db.query(
-        `INSERT INTO task_queue
-         (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
-         VALUES (?, ?, 'codex_mission', ?, 1, 'queued', ?, ?, ?)`
-      ).run(
-        crypto.randomUUID(),
-        runId,
-        JSON.stringify({
-          dedupeKey,
-          payload: {
-            taskType: "codex_mission",
-            runId,
-            domain: "slack",
-            objective: "Respond to Slack user request with memory-grounded answer and actions",
-            title: "Slack codex mission",
-            requestText: normalizedText,
-            responseChannel: channel,
-            responseThreadTs: eventTs,
-            repoPath: env.PRIMARY_REPO_PATH ?? "",
-            cwd: env.PRIMARY_REPO_PATH ?? process.cwd(),
-          },
-          coalescedCount: 0,
-          title: "Slack codex mission",
-        }),
-        now,
-        now,
-        now
-      );
-      db.close();
-    }
-
-    return json({ ok: true, accepted: true, receivedAt: new Date().toISOString() }, 202);
   }
 
   // Native API endpoints.
@@ -345,6 +251,51 @@ export const createHandler = (options?: HandlerOptions) => {
         parseLimitParam(url, "limit", 10, 1, 100)
       )
     );
+  }
+  if (req.method === "GET" && pathname === "/api/chat/conversations") {
+    return json(
+      await services.chat.listConversations(
+        url.searchParams.get("cursor") ?? undefined,
+        parseLimitParam(url, "limit", 30, 1, 100)
+      )
+    );
+  }
+  if (req.method === "POST" && pathname === "/api/chat/conversations") {
+    const body = req.headers.get("content-type")?.includes("application/json")
+      ? ((await req.json()) as { title?: string })
+      : {};
+    return json(await services.chat.createConversation(body.title));
+  }
+  const chatConversationMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)$/);
+  if (req.method === "GET" && chatConversationMatch) {
+    const result = await services.chat.getConversation(chatConversationMatch[1]);
+    if (!result) return json({ ok: false, error: "not_found" }, 404);
+    return json(result);
+  }
+  const chatMessageMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/messages$/);
+  if (req.method === "POST" && chatMessageMatch) {
+    const body = req.headers.get("content-type")?.includes("application/json")
+      ? ((await req.json()) as { content?: string; mode?: "chat" | "mission"; repoPath?: string })
+      : {};
+    if (!body.content || !body.content.trim()) {
+      return json({ ok: false, error: "empty_message" }, 400);
+    }
+    return json(
+      await services.chat.sendMessage({
+        conversationId: chatMessageMatch[1],
+        content: body.content,
+        mode: body.mode,
+        repoPath: body.repoPath,
+      })
+    );
+  }
+  const chatCompactMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/compact$/);
+  if (req.method === "POST" && chatCompactMatch) {
+    return json(await services.chat.compactConversation(chatCompactMatch[1]));
+  }
+  const chatRunsMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/runs$/);
+  if (req.method === "GET" && chatRunsMatch) {
+    return json(await services.chat.listRuns(chatRunsMatch[1]));
   }
   if (req.method === "POST" && pathname === "/api/graph/impact") {
     const body = req.headers.get("content-type")?.includes("application/json")

@@ -1,11 +1,13 @@
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it } from 'bun:test';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { LocalNetworkBanner } from './LocalNetworkBanner';
 
 describe('LocalNetworkBanner', () => {
   it('renders local network warning copy', () => {
-    render(<LocalNetworkBanner />);
-
-    expect(screen.getByRole('note', { name: /local network only/i })).toBeInTheDocument();
-    expect(screen.getByText(/trusted lan access only/i)).toBeInTheDocument();
+    const html = renderToStaticMarkup(<LocalNetworkBanner />);
+    expect(html).toContain('role="note"');
+    expect(html).toContain('aria-label="Local network only"');
+    expect(html).toContain('Local Network Only');
+    expect(html).toContain('trusted LAN access only');
   });
 });

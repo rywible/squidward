@@ -178,31 +178,10 @@ export class MoonshotEngine {
       const lowRisk = candidate.riskClass === "low";
       const withinTop = selected < topN;
       const canAutoQueue = lowRisk && score.ev >= minEvAutorun && withinTop;
-      const decision: PortfolioDecision = canAutoQueue ? "queued_draft" : "advisory";
+      const decision: PortfolioDecision = "advisory";
       let queuedTaskId: string | null = null;
-
       if (canAutoQueue) {
-        queuedTaskId = `task_portfolio_${candidate.id}_${Date.now()}`;
-        this.db
-          .query(
-            `INSERT OR REPLACE INTO task_queue
-             (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
-             VALUES (?, ?, 'portfolio_eval', ?, ?, 'queued', ?, ?, ?)`
-          )
-          .run(
-            queuedTaskId,
-            scoreId,
-            JSON.stringify({
-              title: candidate.title,
-              candidateId: candidate.id,
-              sourceRef: candidate.sourceRef,
-              action: "draft_pr",
-            }),
-            score.ev >= 2 ? 1 : score.ev >= 1 ? 2 : 3,
-            isoNow(),
-            isoNow(),
-            isoNow()
-          );
+        // Portfolio ranker remains advisory in v1.5 to avoid self-amplifying internal queue loops.
         selected += 1;
       }
 
@@ -217,7 +196,7 @@ export class MoonshotEngine {
           scoreId,
           decision,
           minEvAutorun,
-          canAutoQueue ? "low_risk_ev_threshold" : "advisory_or_below_threshold",
+          canAutoQueue ? "low_risk_ev_threshold_advisory_only" : "advisory_or_below_threshold",
           queuedTaskId,
           isoNow()
         );
@@ -435,7 +414,7 @@ export class MoonshotEngine {
     this.db
       .query(
         `INSERT INTO cto_memos
-         (id, week_start, week_end, summary_md, evidence_links, delivered_to_slack, created_at)
+         (id, week_start, week_end, summary_md, evidence_links, delivered_to_ui, created_at)
          VALUES (?, ?, ?, ?, ?, 0, ?)`
       )
       .run(memoId, weekStart, weekEnd, summaryMd, JSON.stringify([]), isoNow());

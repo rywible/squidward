@@ -8,6 +8,10 @@ import type {
   AuditEntry,
   BraveBudgetResponse,
   CtoMemo,
+  Conversation,
+  ConversationMessage,
+  ConversationRun,
+  ConversationState,
   CockpitSnapshot,
   EvidencePath,
   GeneratedTestCandidate,
@@ -163,7 +167,7 @@ const ensureSeed = (db: Database): void => {
     { domain: "general", soft: 50000, hard: 100000 },
     { domain: "aps", soft: 40000, hard: 80000 },
     { domain: "memo", soft: 25000, hard: 45000 },
-    { domain: "slack", soft: 20000, hard: 35000 },
+    { domain: "chat", soft: 20000, hard: 35000 },
     { domain: "triage", soft: 30000, hard: 60000 },
   ];
   for (const budget of tokenBudgets) {
@@ -345,6 +349,61 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
       recommendations,
       asks,
       createdAt: String(row.created_at),
+    };
+  };
+
+  const mapConversation = (row: SqlRecord): Conversation => ({
+    id: String(row.id),
+    title: String(row.title),
+    status: (String(row.status) === "archived" ? "archived" : "active") as Conversation["status"],
+    lastMessageAt: row.last_message_at ? String(row.last_message_at) : undefined,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  });
+
+  const mapConversationMessage = (row: SqlRecord): ConversationMessage => ({
+    id: String(row.id),
+    conversationId: String(row.conversation_id),
+    role: (["user", "assistant", "system"].includes(String(row.role)) ? String(row.role) : "assistant") as ConversationMessage["role"],
+    mode: (String(row.mode) === "mission" ? "mission" : "chat") as ConversationMessage["mode"],
+    status: (["queued", "running", "done", "blocked", "failed"].includes(String(row.status)) ? String(row.status) : "done") as ConversationMessage["status"],
+    content: String(row.content ?? ""),
+    runId: row.run_id ? String(row.run_id) : undefined,
+    retrievalQueryId: row.retrieval_query_id ? String(row.retrieval_query_id) : undefined,
+    evidenceRefs: parseJsonObject<string[]>(row.evidence_refs_json, []),
+    tokenInput: row.token_input === null || row.token_input === undefined ? undefined : Number(row.token_input),
+    tokenOutput: row.token_output === null || row.token_output === undefined ? undefined : Number(row.token_output),
+    latencyMs: row.latency_ms === null || row.latency_ms === undefined ? undefined : Number(row.latency_ms),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  });
+
+  const mapConversationRun = (row: SqlRecord): ConversationRun => ({
+    id: String(row.id),
+    conversationId: String(row.conversation_id),
+    userMessageId: String(row.user_message_id),
+    assistantMessageId: row.assistant_message_id ? String(row.assistant_message_id) : undefined,
+    runId: String(row.run_id),
+    lane: (String(row.lane) === "mission" ? "mission" : "chat") as ConversationRun["lane"],
+    status: (["queued", "running", "done", "blocked", "failed"].includes(String(row.status)) ? String(row.status) : "queued") as ConversationRun["status"],
+    errorText: row.error_text ? String(row.error_text) : undefined,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  });
+
+  const compactConversationMessages = (rows: ConversationMessage[], keepRaw = 8): { summary: string; turns: number } => {
+    const bounded = rows.slice(0, Math.max(0, rows.length - keepRaw));
+    if (bounded.length === 0) {
+      return { summary: "", turns: 0 };
+    }
+    const lines = bounded.map((message) => {
+      const who = message.role === "assistant" ? "Assistant" : message.role === "user" ? "User" : "System";
+      const compact = message.content.replace(/\s+/g, " ").trim().slice(0, 220);
+      return `${who}: ${compact}`;
+    });
+    return {
+      summary: lines.join("\n"),
+      turns: bounded.length,
     };
   };
 
@@ -1825,6 +1884,256 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
           nowIso()
         );
         return { ok: true };
+      },
+    },
+
+    chat: {
+      async listConversations(cursor?: string, limit?: number): Promise<{ items: Conversation[]; nextCursor?: string }> {
+        const boundedLimit = clampLimit(limit, 30, 100);
+        const parsedCursor = parseCursor(cursor);
+        const values: Array<string | number> = [];
+        let where = "WHERE 1=1";
+        if (parsedCursor) {
+          where += " AND (updated_at < ? OR (updated_at = ? AND id < ?))";
+          values.push(parsedCursor.createdAt, parsedCursor.createdAt, parsedCursor.id);
+        }
+        values.push(boundedLimit + 1);
+        const rows = db
+          .query(
+            `SELECT id, title, status, last_message_at, created_at, updated_at
+             FROM conversations
+             ${where}
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`
+          )
+          .all(...values) as SqlRecord[];
+        const hasMore = rows.length > boundedLimit;
+        const selected = hasMore ? rows.slice(0, boundedLimit) : rows;
+        const items = selected.map(mapConversation);
+        return {
+          items,
+          nextCursor:
+            hasMore && items.length > 0 ? toCursor(items[items.length - 1].updatedAt, items[items.length - 1].id) : undefined,
+        };
+      },
+      async createConversation(title?: string): Promise<Conversation> {
+        const now = nowIso();
+        const id = crypto.randomUUID();
+        const normalizedTitle = (title ?? "").trim() || "New conversation";
+        db.query(
+          `INSERT INTO conversations
+           (id, title, status, pinned_facts_json, created_at, updated_at)
+           VALUES (?, ?, 'active', '[]', ?, ?)`
+        ).run(id, normalizedTitle.slice(0, 120), now, now);
+        db.query(
+          `INSERT OR REPLACE INTO conversation_state
+           (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
+           VALUES (?, '', 0, NULL, NULL, 4000, ?)`
+        ).run(id, now);
+        const row = db
+          .query(
+            `SELECT id, title, status, last_message_at, created_at, updated_at
+             FROM conversations
+             WHERE id=?`
+          )
+          .get(id) as SqlRecord;
+        return mapConversation(row);
+      },
+      async getConversation(conversationId: string): Promise<{
+        conversation: Conversation;
+        state: ConversationState | null;
+        messages: ConversationMessage[];
+      } | null> {
+        const row = db
+          .query(
+            `SELECT id, title, status, last_message_at, created_at, updated_at
+             FROM conversations
+             WHERE id=?
+             LIMIT 1`
+          )
+          .get(conversationId) as SqlRecord | null;
+        if (!row) {
+          return null;
+        }
+        const stateRow = db
+          .query(
+            `SELECT conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at
+             FROM conversation_state
+             WHERE conversation_id=?`
+          )
+          .get(conversationId) as SqlRecord | null;
+        const messageRows = db
+          .query(
+            `SELECT id, conversation_id, role, mode, status, content, run_id, retrieval_query_id, evidence_refs_json, token_input, token_output, latency_ms, created_at, updated_at
+             FROM conversation_messages
+             WHERE conversation_id=?
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1000`
+          )
+          .all(conversationId) as SqlRecord[];
+        return {
+          conversation: mapConversation(row),
+          state: stateRow
+            ? {
+                conversationId: String(stateRow.conversation_id),
+                summaryText: String(stateRow.summary_text ?? ""),
+                summaryTurnCount: Number(stateRow.summary_turn_count ?? 0),
+                compactedAt: stateRow.compacted_at ? String(stateRow.compacted_at) : undefined,
+                lastIntent: stateRow.last_intent ? String(stateRow.last_intent) : undefined,
+                tokenBudget: Number(stateRow.token_budget ?? 4000),
+                updatedAt: String(stateRow.updated_at),
+              }
+            : null,
+          messages: messageRows.map(mapConversationMessage),
+        };
+      },
+      async sendMessage(input: {
+        conversationId: string;
+        content: string;
+        mode?: "chat" | "mission";
+        repoPath?: string;
+      }): Promise<{
+        conversation: Conversation;
+        userMessage: ConversationMessage;
+        assistantMessage: ConversationMessage;
+        run: ConversationRun;
+      }> {
+        const conversationRow = db
+          .query(`SELECT id, title, status, created_at, updated_at, last_message_at FROM conversations WHERE id=? LIMIT 1`)
+          .get(input.conversationId) as SqlRecord | null;
+        if (!conversationRow) {
+          throw new Error("conversation_not_found");
+        }
+        const now = nowIso();
+        const lane = input.mode === "mission" ? "mission" : "chat";
+        const normalized = input.content.trim();
+        if (!normalized) {
+          throw new Error("empty_message");
+        }
+        const runId = `run_web_${Date.now()}`;
+        const userMessageId = crypto.randomUUID();
+        const assistantMessageId = crypto.randomUUID();
+        const runRowId = crypto.randomUUID();
+        db.query(
+          `INSERT INTO conversation_messages
+           (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
+           VALUES (?, ?, 'user', ?, 'done', ?, ?, '[]', ?, ?)`
+        ).run(userMessageId, input.conversationId, lane, normalized, runId, now, now);
+        db.query(
+          `INSERT INTO conversation_messages
+           (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
+           VALUES (?, ?, 'assistant', ?, 'queued', '', ?, '[]', ?, ?)`
+        ).run(assistantMessageId, input.conversationId, lane, runId, now, now);
+        db.query(
+          `INSERT INTO conversation_runs
+           (id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`
+        ).run(runRowId, input.conversationId, userMessageId, assistantMessageId, runId, lane, now, now);
+        db.query(
+          `UPDATE conversations
+           SET last_message_at=?, updated_at=?
+           WHERE id=?`
+        ).run(now, now, input.conversationId);
+        db.query(
+          `INSERT INTO task_queue
+           (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, 'queued', ?, ?, ?)`
+        ).run(
+          crypto.randomUUID(),
+          runId,
+          lane === "chat" ? "chat_reply" : "codex_mission",
+          JSON.stringify({
+            dedupeKey: `web:${input.conversationId}:${userMessageId}`,
+            payload: {
+              taskType: lane === "chat" ? "chat_reply" : "codex_mission",
+              runId,
+              domain: lane === "chat" ? "chat" : "general",
+              objective: lane === "chat" ? "Respond to web chat message" : "Execute heavy mission requested via web chat",
+              title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
+              requestText: normalized,
+              repoPath: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? "",
+              cwd: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? process.cwd(),
+              conversationId: input.conversationId,
+              userMessageId,
+              assistantMessageId,
+              responseMode: lane,
+            },
+            coalescedCount: 0,
+            title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
+          }),
+          now,
+          now,
+          now
+        );
+        const conversation = mapConversation(
+          db
+            .query(`SELECT id, title, status, last_message_at, created_at, updated_at FROM conversations WHERE id=?`)
+            .get(input.conversationId) as SqlRecord
+        );
+        const userMessage = mapConversationMessage(
+          db
+            .query(
+              `SELECT id, conversation_id, role, mode, status, content, run_id, retrieval_query_id, evidence_refs_json, token_input, token_output, latency_ms, created_at, updated_at
+               FROM conversation_messages WHERE id=?`
+            )
+            .get(userMessageId) as SqlRecord
+        );
+        const assistantMessage = mapConversationMessage(
+          db
+            .query(
+              `SELECT id, conversation_id, role, mode, status, content, run_id, retrieval_query_id, evidence_refs_json, token_input, token_output, latency_ms, created_at, updated_at
+               FROM conversation_messages WHERE id=?`
+            )
+            .get(assistantMessageId) as SqlRecord
+        );
+        const run = mapConversationRun(
+          db
+            .query(
+              `SELECT id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, error_text, created_at, updated_at
+               FROM conversation_runs
+               WHERE id=?`
+            )
+            .get(runRowId) as SqlRecord
+        );
+        return { conversation, userMessage, assistantMessage, run };
+      },
+      async listRuns(conversationId: string): Promise<{ items: ConversationRun[] }> {
+        const rows = db
+          .query(
+            `SELECT id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, error_text, created_at, updated_at
+             FROM conversation_runs
+             WHERE conversation_id=?
+             ORDER BY created_at DESC
+             LIMIT 200`
+          )
+          .all(conversationId) as SqlRecord[];
+        return { items: rows.map(mapConversationRun) };
+      },
+      async compactConversation(conversationId: string): Promise<{ ok: boolean; summaryText: string }> {
+        const rows = db
+          .query(
+            `SELECT id, conversation_id, role, mode, status, content, run_id, retrieval_query_id, evidence_refs_json, token_input, token_output, latency_ms, created_at, updated_at
+             FROM conversation_messages
+             WHERE conversation_id=?
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1000`
+          )
+          .all(conversationId) as SqlRecord[];
+        const messages = rows.map(mapConversationMessage);
+        const compacted = compactConversationMessages(messages, 8);
+        const now = nowIso();
+        db.query(
+          `INSERT INTO conversation_state
+           (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
+           VALUES (?, ?, ?, ?, NULL, 4000, ?)
+           ON CONFLICT(conversation_id) DO UPDATE SET
+             summary_text=excluded.summary_text,
+             summary_turn_count=excluded.summary_turn_count,
+             compacted_at=excluded.compacted_at,
+             token_budget=excluded.token_budget,
+             updated_at=excluded.updated_at`
+        ).run(conversationId, compacted.summary, compacted.turns, now, now);
+        return { ok: true, summaryText: compacted.summary };
       },
     },
 

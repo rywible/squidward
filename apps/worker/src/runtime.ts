@@ -1,6 +1,5 @@
 import type { WorkerDb } from "./db";
 import type { SchedulerMode } from "./types";
-import type { SlackAdapter } from "./adapters";
 import { schedulerIntervalMs, selectSchedulerMode } from "./scheduler";
 import { SerializedTaskProcessor } from "./queue";
 import { CodexSessionManager } from "./session-manager";
@@ -15,72 +14,9 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
-const extractQuotedReply = (summary: string): string | null => {
-  const match = summary.match(/["“]([^"”\n]{1,1200})["”]/);
-  return match?.[1]?.trim() || null;
-};
-
-const toSlackUserReply = (summary: string): string => {
-  const trimmed = summary.trim();
-  if (!trimmed) return "Done.";
-  const quoted = extractQuotedReply(trimmed);
-  if (quoted) return quoted;
-  const firstLine = trimmed
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  const candidate = firstLine ?? trimmed;
-  if (/^(prepared|drafted|assembled|queued|planned)\b/i.test(candidate) && /\breply\b/i.test(candidate)) {
-    return "On it. What do you want me to prioritize first?";
-  }
-  return candidate.length > 1200 ? `${candidate.slice(0, 1197)}...` : candidate;
-};
-
-const buildSlackUserReplyObjective = (requestText: string): string =>
-  [
-    requestText,
-    "",
-    "Slack reply contract:",
-    "- `summary` must be the exact user-facing message text.",
-    "- No internal/meta language (prepared, drafted, dispatch, retrieval, evidence, mission).",
-    "- No process narration or tool mentions.",
-    "- Keep it direct and concise.",
-  ].join("\n");
-
-const isScheduleIntrospectionRequest = (text?: string): boolean => {
-  const normalized = (text ?? "").trim().toLowerCase();
-  if (!normalized) return false;
-  return /(upcoming|planned|queue|queued|cron|schedule|heartbeat|what tasks)/.test(normalized);
-};
-
-const formatScheduleSummary = (input: {
-  queuedCount: number;
-  memoWeekday: number;
-  memoHour: number;
-  graphReindexIntervalMinutes: number;
-  perfEnabled: boolean;
-  perfNightlyHour: number;
-  perfSmokeOnChange: boolean;
-}): string => {
-  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][Math.max(0, Math.min(6, input.memoWeekday))] ?? "Mon";
-  const lines: string[] = [];
-  lines.push(`Queued right now: ${input.queuedCount} task(s).`);
-  lines.push("Scheduled cadence:");
-  lines.push("- Portfolio ranker: daily");
-  lines.push("- Test evolution: every 10 minutes");
-  lines.push(`- CTO memo: weekly (${weekday} @ ${String(input.memoHour).padStart(2, "0")}:00)`);
-  lines.push(`- Graph reindex: every ${input.graphReindexIntervalMinutes} minutes`);
-  if (input.perfEnabled) {
-    lines.push(`- APS nightly baseline: daily @ ${String(input.perfNightlyHour).padStart(2, "0")}:00`);
-    lines.push(`- APS smoke on repo change: ${input.perfSmokeOnChange ? "enabled" : "disabled"}`);
-  } else {
-    lines.push("- APS: disabled");
-  }
-  return lines.join("\n");
-};
-
 export type WorkerTaskType =
   | "maintenance"
+  | "chat_reply"
   | "codex_mission"
   | "portfolio_eval"
   | "test_gen"
@@ -106,6 +42,10 @@ export interface WorkerTaskPayload {
   requestText?: string;
   repoPath?: string;
   title?: string;
+  conversationId?: string;
+  userMessageId?: string;
+  assistantMessageId?: string;
+  responseMode?: "chat" | "mission";
   candidateId?: string;
   profile?: "smoke" | "standard" | "deep";
   triggerSource?: string;
@@ -123,7 +63,6 @@ export interface WorkerRuntimeDeps {
   memoryGovernor?: MemoryGovernor;
   wrelaLearning?: WrelaLearningService;
   worktrees?: WorktreeManager;
-  slack?: SlackAdapter;
   config?: {
     portfolioTopN?: number;
     portfolioMinEvAutorun?: number;
@@ -133,6 +72,7 @@ export interface WorkerRuntimeDeps {
     graphReindexIntervalMinutes?: number;
     primaryRepoPath?: string;
     retrievalBudgetTokens?: number;
+    maxSkillsPerMission?: number;
     maxTasksPerHeartbeat?: number;
     maxCodexSessions?: number;
     codexWorktreesEnabled?: boolean;
@@ -153,7 +93,6 @@ export class WorkerRuntime {
   private readonly memoryGovernor: MemoryGovernor | null;
   private readonly wrelaLearning: WrelaLearningService | null;
   private readonly worktrees: WorktreeManager | null;
-  private readonly slack: SlackAdapter | null;
   private readonly sqliteDb: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } | null;
   private readonly config: Required<NonNullable<WorkerRuntimeDeps["config"]>>;
   private readonly now: () => Date;
@@ -181,7 +120,6 @@ export class WorkerRuntime {
     this.memoryGovernor = deps.memoryGovernor ?? null;
     this.wrelaLearning = deps.wrelaLearning ?? null;
     this.worktrees = deps.worktrees ?? null;
-    this.slack = deps.slack ?? null;
     this.sqliteDb = (this.db as { db?: { query: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db ?? null;
     this.config = {
       portfolioTopN: deps.config?.portfolioTopN ?? 5,
@@ -192,6 +130,7 @@ export class WorkerRuntime {
       graphReindexIntervalMinutes: deps.config?.graphReindexIntervalMinutes ?? 60,
       primaryRepoPath: deps.config?.primaryRepoPath ?? process.cwd(),
       retrievalBudgetTokens: Math.max(512, Math.min(16000, deps.config?.retrievalBudgetTokens ?? 4000)),
+      maxSkillsPerMission: Math.max(1, Math.min(5, deps.config?.maxSkillsPerMission ?? 2)),
       maxTasksPerHeartbeat: Math.max(1, Math.min(50, deps.config?.maxTasksPerHeartbeat ?? 8)),
       maxCodexSessions: Math.max(1, Math.min(16, deps.config?.maxCodexSessions ?? 4)),
       codexWorktreesEnabled: deps.config?.codexWorktreesEnabled ?? true,
@@ -252,7 +191,11 @@ export class WorkerRuntime {
           const availableSlots = Math.max(0, Math.min(this.config.maxTasksPerHeartbeat, this.sessions.getAvailableSlots()));
           const work: Array<Promise<void>> = [];
           for (let i = 0; i < availableSlots; i += 1) {
-            const claimed = await this.queue.claimNext();
+            // Reserve the first slot for interactive user work when present.
+            const claimed =
+              i === 0
+                ? await this.queue.claimNextForTaskTypes(["chat_reply", "codex_mission"])
+                : await this.queue.claimNext();
             if (!claimed) {
               break;
             }
@@ -335,6 +278,41 @@ export class WorkerRuntime {
     }, waitMs);
   }
 
+  private async countQueuedByTaskTypes(taskTypes: string[], now: Date): Promise<number> {
+    if (taskTypes.length === 0) {
+      return 0;
+    }
+    const ready = await this.db.listReadyQueueItems(500, now);
+    return ready.filter((item) => {
+      const payload = item.payload as { taskType?: string } | null;
+      return payload?.taskType ? taskTypes.includes(payload.taskType) : false;
+    }).length;
+  }
+
+  private trimQueuedTaskType(taskType: string, keep: number): void {
+    if (!this.sqliteDb) {
+      return;
+    }
+    try {
+      this.sqliteDb
+        .query(
+          `DELETE FROM task_queue
+           WHERE status='queued'
+             AND task_type = ?
+             AND id NOT IN (
+               SELECT id
+               FROM task_queue
+               WHERE status='queued' AND task_type = ?
+               ORDER BY datetime(created_at) DESC
+               LIMIT ?
+             )`
+        )
+        .run(taskType, taskType, keep);
+    } catch (error) {
+      console.error(`[worker] failed to trim queued tasks for ${taskType}:`, error);
+    }
+  }
+
   private async executeTask(task: WorkerTaskPayload): Promise<void> {
     if (!task || typeof task !== "object") {
       task = {
@@ -354,34 +332,30 @@ export class WorkerRuntime {
 
     const startedAt = this.now();
     try {
-      if (taskType === "codex_mission") {
-        if (this.slack && task.responseChannel && task.domain === "slack" && isScheduleIntrospectionRequest(task.requestText)) {
-          const queuedCount = await this.db.countReadyQueueItems(this.now());
-          const scheduleReply = formatScheduleSummary({
-            queuedCount,
-            memoWeekday: this.config.memoWeekday,
-            memoHour: this.config.memoHour,
-            graphReindexIntervalMinutes: this.config.graphReindexIntervalMinutes,
-            perfEnabled: this.config.perfScientist.enabled ?? false,
-            perfNightlyHour: this.config.perfScientist.nightlyHour ?? 2,
-            perfSmokeOnChange: this.config.perfScientist.smokeOnChange ?? true,
-          });
-          await this.slack.postMessage(task.responseChannel, scheduleReply);
-          await this.db.appendCommandAudit({
-            id: crypto.randomUUID(),
-            runId: task.runId,
-            command: "internal:slack_schedule_introspection",
-            cwd: task.cwd ?? this.config.primaryRepoPath,
-            startedAt,
-            finishedAt: this.now(),
-            exitCode: 0,
-            artifactRefs: [`queuedCount=${queuedCount}`],
-          });
-          return;
+      if (this.sqliteDb && task.conversationId && (taskType === "chat_reply" || taskType === "codex_mission")) {
+        const runningAt = startedAt.toISOString();
+        this.sqliteDb
+          .query(
+            `UPDATE conversation_runs
+             SET status='running', updated_at=?
+             WHERE run_id=?`
+          )
+          .run(runningAt, task.runId);
+        if (task.assistantMessageId) {
+          this.sqliteDb
+            .query(
+              `UPDATE conversation_messages
+               SET status='running', updated_at=?
+               WHERE id=?`
+            )
+            .run(runningAt, task.assistantMessageId);
         }
+      }
+      if (taskType === "codex_mission" || taskType === "chat_reply") {
         if (!this.codexHarness || !this.memoryGovernor) {
           throw new Error("codex_harness_not_configured");
         }
+        const lane = taskType === "chat_reply" ? "chat" : "mission";
         const canonicalRepoPath = task.repoPath ?? this.config.primaryRepoPath;
         let executionCwd = task.cwd ?? canonicalRepoPath;
         let lease: { cleanup(success: boolean): void; path: string } | null = null;
@@ -391,9 +365,9 @@ export class WorkerRuntime {
           executionCwd = lease.path;
         }
         try {
-        const domain = task.domain ?? "general";
+        const domain = task.domain ?? (lane === "chat" ? "chat" : "general");
         const tokenEnvelope = buildTokenEnvelope(this.sqliteDb as never, domain);
-        const objective = task.objective ?? task.title ?? "Execute codex mission";
+        const objective = task.objective ?? task.title ?? (lane === "chat" ? "Answer user chat message" : "Execute codex mission");
         const missionPack = buildMissionPack({
           db: this.sqliteDb as never,
           task,
@@ -401,29 +375,30 @@ export class WorkerRuntime {
           objective,
           tokenEnvelope,
           retrievalBudgetTokens: this.config.retrievalBudgetTokens,
+          maxSkillsPerMission: this.config.maxSkillsPerMission,
         });
         const parsed = await this.codexHarness.run({
           missionPack,
-          objectiveDetails:
-            task.domain === "slack" && task.responseChannel
-              ? buildSlackUserReplyObjective(task.requestText ?? task.command ?? objective)
-              : (task.requestText ?? task.command ?? objective),
+          objectiveDetails: task.requestText ?? task.command ?? objective,
           cwd: executionCwd,
           model: task.model,
         });
         const memoryResult = this.memoryGovernor.commit(task.runId, parsed.payload.memoryProposals, "codex_harness");
+        const finishedAt = this.now();
+        const latencyMs = Math.max(0, finishedAt.getTime() - startedAt.getTime());
         if (this.sqliteDb) {
           this.sqliteDb
             .query(
               `INSERT INTO memory_episodes
                (id, run_id, trigger_type, context_json, actions_json, outcome_json, created_at)
-               VALUES (?, ?, 'codex_mission', ?, ?, ?, ?)`
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
             )
             .run(
               crypto.randomUUID(),
               task.runId,
+              taskType,
               JSON.stringify({
-                taskType: "codex_mission",
+                taskType,
                 contextHash: parsed.contextHash,
                 domain,
                 retrieval: {
@@ -433,6 +408,11 @@ export class WorkerRuntime {
                   budgetTokens: missionPack.context.retrieval.budgetTokens,
                   evidenceRefs: missionPack.context.retrieval.evidenceRefs.slice(0, 20),
                 },
+                selectedSkills: missionPack.context.selectedSkills.map((skill) => ({
+                  id: skill.id,
+                  confidence: skill.confidence,
+                  reason: skill.reason,
+                })),
               }),
               JSON.stringify(parsed.payload.actionsTaken),
               JSON.stringify({
@@ -440,7 +420,7 @@ export class WorkerRuntime {
                 summary: parsed.payload.summary,
                 acceptedMemoryWrites: memoryResult.accepted,
               }),
-              this.now().toISOString()
+              finishedAt.toISOString()
             );
 
           const armId = `arm_${domain}_default`;
@@ -463,7 +443,7 @@ export class WorkerRuntime {
               parsed.contextHash,
               armId,
               parsed.payload.status === "done" ? "mission_completed" : "mission_blocked",
-              this.now().toISOString()
+              finishedAt.toISOString()
             );
           recordReward(this.sqliteDb as never, {
             policyDecisionId,
@@ -474,15 +454,69 @@ export class WorkerRuntime {
             noisePenalty: -0.1,
             latencyMinutes: 0,
           });
+
+          if (task.conversationId) {
+            const assistantMessageId = task.assistantMessageId ?? crypto.randomUUID();
+            const tokenInput = missionPack.context.retrieval.usedTokens;
+            const tokenOutput = Math.max(1, Math.ceil(parsed.payload.summary.length / 4));
+            this.sqliteDb
+              .query(
+                `INSERT INTO conversation_messages
+                 (id, conversation_id, role, mode, status, content, run_id, retrieval_query_id, evidence_refs_json, token_input, token_output, latency_ms, created_at, updated_at)
+                 VALUES (?, ?, 'assistant', ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                   content=excluded.content,
+                   status='done',
+                   run_id=excluded.run_id,
+                   retrieval_query_id=excluded.retrieval_query_id,
+                   evidence_refs_json=excluded.evidence_refs_json,
+                   token_input=excluded.token_input,
+                   token_output=excluded.token_output,
+                   latency_ms=excluded.latency_ms,
+                   updated_at=excluded.updated_at`
+              )
+              .run(
+                assistantMessageId,
+                task.conversationId,
+                lane,
+                parsed.payload.summary,
+                task.runId,
+                missionPack.context.retrieval.queryId,
+                JSON.stringify(missionPack.context.retrieval.evidenceRefs.slice(0, 20)),
+                tokenInput,
+                tokenOutput,
+                latencyMs,
+                finishedAt.toISOString(),
+                finishedAt.toISOString()
+              );
+
+            this.sqliteDb
+              .query(
+                `UPDATE conversation_runs
+                 SET assistant_message_id=?, status=?, error_text=NULL, updated_at=?
+                 WHERE run_id=?`
+              )
+              .run(
+                assistantMessageId,
+                parsed.payload.status === "done" ? "done" : "blocked",
+                finishedAt.toISOString(),
+                task.runId
+              );
+
+            this.sqliteDb
+              .query(
+                `UPDATE conversations
+                 SET last_message_at=?, updated_at=?
+                 WHERE id=?`
+              )
+              .run(finishedAt.toISOString(), finishedAt.toISOString(), task.conversationId);
+          }
         }
         this.wrelaLearning?.ingestRun(
           task.runId,
           parsed.payload.status === "done" ? "success" : "failed",
           objective
         );
-        if (this.slack && task.responseChannel) {
-          await this.slack.postMessage(task.responseChannel, toSlackUserReply(parsed.payload.summary));
-        }
         missionSucceeded = true;
         } finally {
           if (lease) {
@@ -495,20 +529,6 @@ export class WorkerRuntime {
         }
       } else if (taskType === "portfolio_eval") {
         this.moonshot.runPortfolioRankerDaily(this.config.portfolioTopN, this.config.portfolioMinEvAutorun);
-        await this.queue.enqueue({
-          dedupeKey: "codex_mission:portfolio_eval",
-          priority: "P2",
-          payload: {
-            taskType: "codex_mission",
-            runId: `run_codex_portfolio_${Date.now()}`,
-            domain: "triage",
-            objective: "Summarize top portfolio opportunities and propose next actions",
-            command: "Analyze latest portfolio rankings and return an action plan.",
-            repoPath: this.config.primaryRepoPath,
-            cwd: this.config.primaryRepoPath,
-            title: "Codex portfolio triage mission",
-          },
-        });
       } else if (taskType === "test_gen") {
         this.moonshot.runTestEvolutionContinuous(this.config.testGenMaxCandidatesPerBug);
       } else if (taskType === "memo_build") {
@@ -644,12 +664,23 @@ export class WorkerRuntime {
         artifactRefs: [`taskType=${taskType}`],
       });
     } catch (error) {
-      if (task.taskType === "codex_mission" && this.slack && task.responseChannel) {
-        const text = `I hit an execution issue on that request (${task.runId}). Please retry in a moment.`;
-        try {
-          await this.slack.postMessage(task.responseChannel, text);
-        } catch (postError) {
-          console.error("[worker] failed to post Slack error reply:", postError);
+      if (this.sqliteDb && task.conversationId) {
+        const failedAt = this.now().toISOString();
+        this.sqliteDb
+          .query(
+            `UPDATE conversation_runs
+             SET status='failed', error_text=?, updated_at=?
+             WHERE run_id=?`
+          )
+          .run(String(error), failedAt, task.runId);
+        if (task.assistantMessageId) {
+          this.sqliteDb
+            .query(
+              `UPDATE conversation_messages
+               SET status='failed', content=?, updated_at=?
+               WHERE id=?`
+            )
+            .run(`Execution failed for ${task.runId}: ${String(error).slice(0, 500)}`, failedAt, task.assistantMessageId);
         }
       }
       await this.db.appendCommandAudit({
@@ -667,8 +698,16 @@ export class WorkerRuntime {
   }
 
   private async enqueueScheduledJobs(now: Date): Promise<void> {
+    // Keep internal maintenance queues bounded so interactive missions are never starved.
+    this.trimQueuedTaskType("portfolio_eval", 24);
+
+    const queueDepth = await this.db.countReadyQueueItems(now);
+    const queuedInteractive = await this.countQueuedByTaskTypes(["chat_reply", "codex_mission"], now);
+    const backlogHigh = queueDepth >= 40;
+    const interactivePending = queuedInteractive > 0;
+
     const nowMs = now.getTime();
-    if (nowMs - this.lastPortfolioAt >= 24 * 60 * 60 * 1000) {
+    if (!backlogHigh && !interactivePending && nowMs - this.lastPortfolioAt >= 24 * 60 * 60 * 1000) {
       await this.queue.enqueue({
         dedupeKey: "portfolio_ranker_daily",
         priority: "P1",
@@ -682,7 +721,7 @@ export class WorkerRuntime {
       this.lastPortfolioAt = nowMs;
     }
 
-    if (nowMs - this.lastTestEvolutionAt >= 10 * 60 * 1000) {
+    if (!backlogHigh && !interactivePending && nowMs - this.lastTestEvolutionAt >= 10 * 60 * 1000) {
       await this.queue.enqueue({
         dedupeKey: "test_evolution_continuous",
         priority: "P1",
@@ -697,7 +736,7 @@ export class WorkerRuntime {
     }
 
     const isMemoWindow = now.getDay() === this.config.memoWeekday && now.getHours() === this.config.memoHour;
-    if (isMemoWindow && nowMs - this.lastMemoAt >= 20 * 60 * 60 * 1000) {
+    if (!backlogHigh && !interactivePending && isMemoWindow && nowMs - this.lastMemoAt >= 20 * 60 * 60 * 1000) {
       await this.queue.enqueue({
         dedupeKey: "cto_memo_weekly",
         priority: "P2",
@@ -711,7 +750,7 @@ export class WorkerRuntime {
       this.lastMemoAt = nowMs;
     }
 
-    if (nowMs - this.lastGraphAt >= this.config.graphReindexIntervalMinutes * 60 * 1000) {
+    if (!backlogHigh && !interactivePending && nowMs - this.lastGraphAt >= this.config.graphReindexIntervalMinutes * 60 * 1000) {
       await this.queue.enqueue({
         dedupeKey: "graph_indexer_incremental",
         priority: "P2",

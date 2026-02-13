@@ -13,7 +13,7 @@ const nowIso = (): string => new Date().toISOString();
 const monthKey = (): string => new Date().toISOString().slice(0, 7);
 
 const DEFAULT_BUDGETS: Array<{ domain: string; softCap: number; hardCap: number }> = [
-  { domain: "slack", softCap: 20000, hardCap: 35000 },
+  { domain: "chat", softCap: 20000, hardCap: 35000 },
   { domain: "triage", softCap: 30000, hardCap: 60000 },
   { domain: "aps", softCap: 40000, hardCap: 80000 },
   { domain: "memo", softCap: 25000, hardCap: 45000 },
@@ -30,7 +30,7 @@ export const ensureTokenBudgets = (db: Database): void => {
 };
 
 const tokenDefaults = (domain: string): { maxInput: number; maxOutput: number } => {
-  if (domain === "slack") return { maxInput: 1200, maxOutput: 250 };
+  if (domain === "chat") return { maxInput: 1200, maxOutput: 250 };
   if (domain === "triage") return { maxInput: 2000, maxOutput: 400 };
   if (domain === "aps") return { maxInput: 3500, maxOutput: 700 };
   if (domain === "memo") return { maxInput: 5000, maxOutput: 1200 };

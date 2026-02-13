@@ -4,7 +4,7 @@ export type HeartbeatMode = (typeof HEARTBEAT_MODES)[number];
 export interface HeartbeatPolicy {
   mode: HeartbeatMode;
   intervalMinutes: number;
-  immediateWakeOnSlackEvent: boolean;
+  immediateWakeOnUserMessage: boolean;
 }
 
 export interface QueueItem {
@@ -40,7 +40,7 @@ export interface AgentRun {
 }
 
 export interface AuthProviderHealth {
-  provider: "slack" | "linear" | "openai" | "github" | "gitlab" | "ci" | "monitoring";
+  provider: "linear" | "openai" | "github" | "gitlab" | "ci" | "monitoring";
   status: "linked" | "expired" | "degraded" | "failed" | "unlinked";
   scopes: string[];
   expiresAt?: string;

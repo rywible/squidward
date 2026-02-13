@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import type { CodexCliAdapter } from "../src/adapters";
 import { CodexHarness } from "../src/codex-harness";
 import { MemoryGovernor } from "../src/memory-governor";
-import { buildMissionPack } from "../src/mission-pack";
+import { buildMissionPack, renderMissionPrompt } from "../src/mission-pack";
 import { recordReward } from "../src/reward-engine";
 import { buildTokenEnvelope } from "../src/token-economy";
 import { WrelaLearningService } from "../src/wrela-learning";
@@ -76,6 +76,11 @@ describe("codex mission harness e2e", () => {
       objective: "test objective",
       tokenEnvelope: envelope,
     });
+    expect(missionPack.context.selectedSkills.length).toBeGreaterThan(0);
+    expect(missionPack.context.selectedSkills.some((skill) => skill.id === "repo-orient")).toBe(true);
+    const prompt = renderMissionPrompt(missionPack, "do it");
+    expect(prompt).toContain("Selected OOB skills");
+    expect(prompt).toContain("Repo Orient");
     const parsed = await harness.run({
       missionPack,
       objectiveDetails: "do it",

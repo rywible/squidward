@@ -1,0 +1,38 @@
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRightCircle,
+  Ban,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ChevronsUp,
+  History,
+  MessageSquare,
+  Minimize2,
+  Pause,
+  Play,
+  Send,
+  Target,
+  XCircle,
+} from 'lucide-react';
+
+export const appIcons = {
+  chat: MessageSquare,
+  focus: Target,
+  history: History,
+  now: Activity,
+  risk: AlertTriangle,
+  next: ArrowRightCircle,
+  run: Play,
+  pause: Pause,
+  prioritize: ChevronsUp,
+  done: CheckCircle2,
+  failed: XCircle,
+  blocked: Ban,
+  expandClosed: ChevronDown,
+  expandOpen: ChevronUp,
+  send: Send,
+  compact: Minimize2,
+} as const;
+

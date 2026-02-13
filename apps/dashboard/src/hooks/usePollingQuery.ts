@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface PollingState<T> {
   data: T | null;
@@ -16,58 +16,116 @@ export function usePollingQuery<T>(
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fetcherRef = useRef(fetcher);
+  const timerRef = useRef<number | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
+  const disposedRef = useRef(false);
+  const errorStreakRef = useRef(0);
+  const runFetchRef = useRef<((isRefresh: boolean) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const scheduleNext = useCallback(
+    (delayMs: number) => {
+      clearTimer();
+      if (disposedRef.current) return;
+      const clamped = Math.max(1500, Math.trunc(delayMs));
+      timerRef.current = window.setTimeout(() => {
+        if (runFetchRef.current) {
+          void runFetchRef.current(true);
+        }
+      }, clamped);
+    },
+    [clearTimer],
+  );
 
   const runFetch = useCallback(
-    async (controller: AbortController, isRefresh: boolean) => {
+    async (isRefresh: boolean) => {
+      if (disposedRef.current || inFlightRef.current) return;
+      if (typeof document !== 'undefined' && document.hidden) {
+        scheduleNext(Math.max(intervalMs, 15_000));
+        return;
+      }
+      inFlightRef.current = true;
+      const controller = new AbortController();
+      controllerRef.current = controller;
       try {
         if (isRefresh) {
           setRefreshing(true);
         } else {
           setLoading(true);
         }
-
-        const result = await fetcher(controller.signal);
+        const result = await fetcherRef.current(controller.signal);
+        if (disposedRef.current) return;
         setData(result);
         setError(null);
+        errorStreakRef.current = 0;
       } catch (err) {
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || disposedRef.current) {
           return;
         }
-
         const message = err instanceof Error ? err.message : 'Unknown API error';
         setError(message);
+        errorStreakRef.current += 1;
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (!disposedRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+        inFlightRef.current = false;
+        const backoffMultiplier = Math.min(6, errorStreakRef.current);
+        const backoffMs = errorStreakRef.current > 0 ? intervalMs * 2 ** backoffMultiplier : intervalMs;
+        const jitterMs = Math.floor(Math.random() * 300);
+        scheduleNext(Math.min(60_000, backoffMs) + jitterMs);
       }
     },
-    [fetcher],
+    [intervalMs, scheduleNext],
   );
 
   useEffect(() => {
-    let activeController = new AbortController();
+    runFetchRef.current = runFetch;
+  }, [runFetch]);
 
-    void runFetch(activeController, false);
+  useEffect(() => {
+    disposedRef.current = false;
+    errorStreakRef.current = 0;
+    void runFetch(false);
 
-    const timer = window.setInterval(() => {
-      activeController.abort();
-      activeController = new AbortController();
-      void runFetch(activeController, true);
-    }, intervalMs);
+    const onVisible = () => {
+      if (document.hidden) return;
+      if (inFlightRef.current) return;
+      void runFetch(true);
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisible);
+    }
 
     return () => {
-      window.clearInterval(timer);
-      activeController.abort();
+      disposedRef.current = true;
+      clearTimer();
+      controllerRef.current?.abort();
+      controllerRef.current = null;
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisible);
+      }
     };
-  }, [intervalMs, runFetch]);
+  }, [runFetch, clearTimer]);
 
-  const refresh = useMemo(
-    () => async () => {
-      const controller = new AbortController();
-      await runFetch(controller, true);
-    },
-    [runFetch],
-  );
+  const refresh = useCallback(async () => {
+    if (inFlightRef.current) return;
+    clearTimer();
+    await runFetch(true);
+  }, [clearTimer, runFetch]);
 
   return {
     data,

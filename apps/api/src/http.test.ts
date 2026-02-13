@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "@squidward/db";
-import { createHmac } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,12 +11,54 @@ const makeDbPath = (): string => {
   return join(dir, "agent.db");
 };
 
-const signSlackRequest = (secret: string, ts: string, body: string): string =>
-  `v0=${createHmac("sha256", secret).update(`v0:${ts}:${body}`).digest("hex")}`;
-
 describe("api handler", () => {
+  const withNoWebAuth = (dbPath: string): Record<string, string> => ({
+    AGENT_DB_PATH: dbPath,
+    WEB_PASSWORD: "",
+  });
+
+  test("requires basic auth when WEB_PASSWORD is configured", async () => {
+    const dbPath = makeDbPath();
+    const handler = createHandler({
+      dbPath,
+      env: {
+        AGENT_DB_PATH: dbPath,
+        WEB_USERNAME: "ryan",
+        WEB_PASSWORD: "supersecret",
+      },
+    });
+
+    const unauthorizedResponse = await handler(new Request("http://localhost/api/dashboard/cockpit"));
+    expect(unauthorizedResponse.status).toBe(401);
+
+    const authHeader = `Basic ${Buffer.from("ryan:supersecret", "utf8").toString("base64")}`;
+    const authorizedResponse = await handler(
+      new Request("http://localhost/api/dashboard/cockpit", {
+        headers: { authorization: authHeader },
+      })
+    );
+    expect(authorizedResponse.status).toBe(200);
+  });
+
+  test("bypasses basic auth for health and ready endpoints", async () => {
+    const dbPath = makeDbPath();
+    const handler = createHandler({
+      dbPath,
+      env: {
+        AGENT_DB_PATH: dbPath,
+        WEB_PASSWORD: "supersecret",
+      },
+    });
+
+    const health = await handler(new Request("http://localhost/healthz"));
+    expect(health.status).toBe(200);
+    const ready = await handler(new Request("http://localhost/readyz"));
+    expect(ready.status).toBe(200);
+  });
+
   test("returns health response", async () => {
-    const handler = createHandler({ dbPath: makeDbPath() });
+    const dbPath = makeDbPath();
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
     const response = await handler(new Request("http://localhost/healthz"));
     expect(response.status).toBe(200);
     const body = (await response.json()) as { ok: boolean };
@@ -25,7 +66,8 @@ describe("api handler", () => {
   });
 
   test("returns dashboard cockpit payload", async () => {
-    const handler = createHandler({ dbPath: makeDbPath() });
+    const dbPath = makeDbPath();
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
     const response = await handler(new Request("http://localhost/api/dashboard/cockpit"));
     expect(response.status).toBe(200);
     const body = (await response.json()) as { activeRuns: number; queuedTasks: number };
@@ -34,8 +76,9 @@ describe("api handler", () => {
   });
 
   test("oauth routes are removed", async () => {
-    const handler = createHandler({ dbPath: makeDbPath() });
-    const start = await handler(new Request("http://localhost/oauth/slack/start"));
+    const dbPath = makeDbPath();
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
+    const start = await handler(new Request("http://localhost/oauth/linear/start"));
     const callback = await handler(new Request("http://localhost/oauth/linear/callback?code=x&state=y"));
     expect(start.status).toBe(404);
     expect(callback.status).toBe(404);
@@ -73,7 +116,6 @@ describe("api handler", () => {
     expect(body.ok).toBe(true);
     expect(typeof body.generatedAt).toBe("string");
 
-    expect(body.providers.slack).toBeTruthy();
     expect(body.providers.linear).toBeTruthy();
     expect(body.providers.openai).toBeTruthy();
     expect(body.providers.github).toBeTruthy();
@@ -159,7 +201,7 @@ describe("api handler", () => {
 
   test("manual retrieval reindex invalidates repo-scoped retrieval cache entries", async () => {
     const dbPath = makeDbPath();
-    const handler = createHandler({ dbPath });
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
     const db = new Database(dbPath, { strict: false });
     db.query(
       `INSERT INTO context_cache
@@ -190,8 +232,8 @@ describe("api handler", () => {
 
   test("oauth refresh endpoint is removed", async () => {
     const dbPath = makeDbPath();
-    const handler = createHandler({ dbPath });
-    const response = await handler(new Request("http://localhost/api/integrations/refresh/slack", { method: "POST" }));
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
+    const response = await handler(new Request("http://localhost/api/integrations/refresh/linear", { method: "POST" }));
     expect(response.status).toBe(404);
   });
 
@@ -232,7 +274,7 @@ describe("api handler", () => {
     ).run();
     db.query(
       `INSERT INTO cto_memos
-       (id, week_start, week_end, summary_md, evidence_links, delivered_to_slack, created_at)
+       (id, week_start, week_end, summary_md, evidence_links, delivered_to_ui, created_at)
        VALUES ('memo_1', datetime('now', '-7 day'), datetime('now'), '# memo', '[]', 0, datetime('now'))`
     ).run();
     db.query(
@@ -345,7 +387,7 @@ describe("api handler", () => {
     ).run();
     db.close();
 
-    const handler = createHandler({ dbPath, env: { AGENT_DB_PATH: dbPath } });
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
 
     const portfolioTop = await handler(new Request("http://localhost/api/portfolio/top?limit=5"));
     expect(portfolioTop.status).toBe(200);
@@ -460,7 +502,8 @@ describe("api handler", () => {
   });
 
   test("gracefully handles malformed limit params on paginated endpoints", async () => {
-    const handler = createHandler({ dbPath: makeDbPath() });
+    const dbPath = makeDbPath();
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
     const endpoints = [
       "http://localhost/api/portfolio/top?limit=abc",
       "http://localhost/api/portfolio/history?limit=abc",
@@ -483,160 +526,46 @@ describe("api handler", () => {
     }
   });
 
-  test("captures retrieval feedback directly from Slack command messages", async () => {
+  test("supports web chat conversation lifecycle", async () => {
     const dbPath = makeDbPath();
-    const secret = "slack-signing-secret";
     const db = new Database(dbPath, { strict: false, create: true });
     db.exec(readFileSync(join(import.meta.dir, "../../../packages/db/migrations/001_initial.sql"), "utf8"));
-    db.query(
-      `INSERT INTO retrieval_queries
-       (id, query_text, intent, repo_path, candidate_count, selected_count, budget_tokens, used_tokens, cache_hit, latency_ms, created_at)
-       VALUES ('rq_abc12345', 'seed', 'meta', '/Users/ryanwible/projects/wrela', 1, 1, 4000, 200, 0, 12, datetime('now'))`
-    ).run();
-    const handler = createHandler({
-      dbPath,
-      env: {
-        AGENT_DB_PATH: dbPath,
-        SLACK_SIGNING_SECRET: secret,
-      },
-    });
-
-    const eventBody = {
-      type: "event_callback",
-      event: {
-        type: "message",
-        channel: "C123",
-        ts: "1710000000.000100",
-        text: "fb rq_abc12345 helpful super useful context",
-      },
-    };
-
-    const body = JSON.stringify(eventBody);
-    const ts = String(Math.floor(Date.now() / 1000));
-    const sig = signSlackRequest(secret, ts, body);
-    const response = await handler(
-      new Request("http://localhost/slack/events", {
+    const handler = createHandler({ dbPath, env: withNoWebAuth(dbPath) });
+    const createResponse = await handler(
+      new Request("http://localhost/api/chat/conversations", {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-slack-request-timestamp": ts,
-          "x-slack-signature": sig,
-        },
-        body,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Perf tasks" }),
       })
     );
-    expect(response.status).toBe(202);
+    expect(createResponse.status).toBe(200);
+    const created = (await createResponse.json()) as { id: string };
 
-    const row = db
-      .query(
-        `SELECT query_id, feedback_type, notes
-         FROM retrieval_feedback
-         ORDER BY created_at DESC
-         LIMIT 1`
-      )
-      .get() as Record<string, unknown> | null;
-    expect(row).not.toBeNull();
-    expect(row?.query_id).toBe("rq_abc12345");
-    expect(row?.feedback_type).toBe("helpful");
-    expect(String(row?.notes ?? "")).toContain("super useful context");
-  });
-
-  test("accepts app_mention events and enqueues codex mission tasks", async () => {
-    const dbPath = makeDbPath();
-    const secret = "slack-signing-secret";
-    const db = new Database(dbPath, { strict: false, create: true });
-    db.exec(readFileSync(join(import.meta.dir, "../../../packages/db/migrations/001_initial.sql"), "utf8"));
-    const handler = createHandler({
-      dbPath,
-      env: {
-        AGENT_DB_PATH: dbPath,
-        SLACK_SIGNING_SECRET: secret,
-        PRIMARY_REPO_PATH: "/Users/ryanwible/projects/wrela",
-      },
-    });
-
-    const eventBody = {
-      type: "event_callback",
-      event: {
-        type: "app_mention",
-        channel: "C123",
-        ts: "1710000000.000100",
-        text: "<@U123ABC> please check the top perf opportunities",
-      },
-    };
-
-    const body = JSON.stringify(eventBody);
-    const ts = String(Math.floor(Date.now() / 1000));
-    const sig = signSlackRequest(secret, ts, body);
-    const response = await handler(
-      new Request("http://localhost/slack/events", {
+    const sendResponse = await handler(
+      new Request(`http://localhost/api/chat/conversations/${created.id}/messages`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-slack-request-timestamp": ts,
-          "x-slack-signature": sig,
-        },
-        body,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Show upcoming tasks", mode: "chat" }),
       })
     );
-    expect(response.status).toBe(202);
+    expect(sendResponse.status).toBe(200);
 
-    const row = db
+    const queued = db
       .query(
-        `SELECT payload_json
+        `SELECT task_type, payload_json
          FROM task_queue
          ORDER BY created_at DESC
          LIMIT 1`
       )
       .get() as Record<string, unknown> | null;
-    expect(row).not.toBeNull();
-    const payload = JSON.parse(String(row?.payload_json ?? "{}")) as {
-      payload?: { requestText?: string };
-    };
-    expect(payload.payload?.requestText).toBe("please check the top perf opportunities");
-  });
+    expect(queued).not.toBeNull();
+    expect(String(queued?.task_type)).toBe("chat_reply");
+    const payload = JSON.parse(String(queued?.payload_json ?? "{}")) as { payload?: { requestText?: string } };
+    expect(payload.payload?.requestText).toBe("Show upcoming tasks");
 
-  test("rejects stale Slack signatures to prevent replay", async () => {
-    const dbPath = makeDbPath();
-    const secret = "slack-signing-secret";
-    const handler = createHandler({
-      dbPath,
-      env: { AGENT_DB_PATH: dbPath, SLACK_SIGNING_SECRET: secret },
-    });
-    const body = JSON.stringify({
-      type: "event_callback",
-      event: { type: "message", channel: "C123", ts: "1710000000.000100", text: "hello" },
-    });
-    const ts = String(Math.floor(Date.now() / 1000) - 3600);
-    const sig = signSlackRequest(secret, ts, body);
-
-    const response = await handler(
-      new Request("http://localhost/slack/events", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-slack-request-timestamp": ts,
-          "x-slack-signature": sig,
-        },
-        body,
-      })
-    );
-    expect(response.status).toBe(401);
-  });
-
-  test("rejects slack event when signing secret is missing", async () => {
-    const dbPath = makeDbPath();
-    const handler = createHandler({ dbPath, env: { AGENT_DB_PATH: dbPath } });
-    const response = await handler(
-      new Request("http://localhost/slack/events", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          type: "event_callback",
-          event: { type: "message", channel: "C123", ts: "1710000000.000100", text: "hello" },
-        }),
-      })
-    );
-    expect(response.status).toBe(401);
+    const detailResponse = await handler(new Request(`http://localhost/api/chat/conversations/${created.id}`));
+    expect(detailResponse.status).toBe(200);
+    const detail = (await detailResponse.json()) as { messages: Array<{ role: string }> };
+    expect(detail.messages.length).toBeGreaterThanOrEqual(2);
   });
 });

@@ -406,3 +406,55 @@ export interface RetrievalContextPack {
   evidenceRefs: string[];
   snippets: Array<{ sourceClass: string; sourceRef: string; score: number; excerpt: string }>;
 }
+
+export type ChatExecutionMode = 'chat' | 'mission';
+export type ChatComposerMode = 'auto' | 'chat' | 'mission';
+
+export interface Conversation {
+  id: string;
+  title: string;
+  status: 'active' | 'archived';
+  lastMessageAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  conversationId: string;
+  role: 'user' | 'assistant' | 'system';
+  mode: ChatExecutionMode;
+  status: 'queued' | 'running' | 'done' | 'blocked' | 'failed';
+  content: string;
+  runId?: string;
+  retrievalQueryId?: string;
+  evidenceRefs: string[];
+  tokenInput?: number;
+  tokenOutput?: number;
+  latencyMs?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationState {
+  conversationId: string;
+  summaryText: string;
+  summaryTurnCount: number;
+  compactedAt?: string;
+  lastIntent?: string;
+  tokenBudget: number;
+  updatedAt: string;
+}
+
+export interface ConversationRun {
+  id: string;
+  conversationId: string;
+  userMessageId: string;
+  assistantMessageId?: string;
+  runId: string;
+  lane: ChatExecutionMode;
+  status: 'queued' | 'running' | 'done' | 'blocked' | 'failed';
+  errorText?: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -41,7 +41,7 @@ describe("SqliteWorkerDb queue compatibility", () => {
       `INSERT INTO task_queue
        (id, source_id, task_type, payload_json, priority, status, scheduled_for, attempts, created_at, updated_at, last_error)
        VALUES
-       ('legacy_task_2', 'legacy_run_2', 'codex_mission', '{"requestText":"hello from slack"}', 1, 'queued', datetime('now'), 0, datetime('now'), datetime('now'), NULL)`
+       ('legacy_task_2', 'legacy_run_2', 'codex_mission', '{"requestText":"hello from chat"}', 1, 'queued', datetime('now'), 0, datetime('now'), datetime('now'), NULL)`
     ).run();
 
     const ready = await workerDb.listReadyQueueItems(10, new Date());

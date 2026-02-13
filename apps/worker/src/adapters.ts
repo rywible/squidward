@@ -15,10 +15,6 @@ interface ExecOptions {
 export type ExecRunner = (command: string, args?: string[], options?: ExecOptions) => Promise<ExecResult>;
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export interface SlackAdapter {
-  postMessage(channel: string, text: string, options?: { threadTs?: string }): Promise<void>;
-}
-
 export interface GithubGhAdapter {
   createDraftPr(params: { title: string; body: string; head: string; base: string }): Promise<{ prNumber: number }>;
   preflightAuth(): Promise<{ ok: boolean; details: string[] }>;
@@ -105,11 +101,6 @@ const buildRuntimeEnv = (baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   return env;
 };
 
-export const normalizeSlackMessageInput = (channel: string, text: string): { channel: string; text: string } => ({
-  channel: normalizeText(channel),
-  text: normalizeText(text),
-});
-
 export const normalizeBraveSearchResults = (
   payload: unknown,
   fetchedAt: Date
@@ -170,49 +161,6 @@ export const normalizeOpenAiOutput = (payload: unknown): string => {
   return textParts.join("\n").trim();
 };
 
-export class StubSlackAdapter implements SlackAdapter {
-  readonly sent: Array<{ channel: string; text: string }> = [];
-
-  async postMessage(channel: string, text: string): Promise<void> {
-    const normalized = normalizeSlackMessageInput(channel, text);
-    this.sent.push(normalized);
-  }
-}
-
-export class RealSlackAdapter implements SlackAdapter {
-  private readonly token: string;
-  private readonly fetchImpl: FetchLike;
-
-  constructor(deps?: { token?: string; fetchImpl?: FetchLike }) {
-    this.token = deps?.token ?? process.env.SLACK_BOT_TOKEN ?? "";
-    this.fetchImpl = deps?.fetchImpl ?? defaultFetch;
-  }
-
-  async postMessage(channel: string, text: string, options?: { threadTs?: string }): Promise<void> {
-    if (!this.token) {
-      throw new Error("SLACK_BOT_TOKEN is required for Slack adapter");
-    }
-
-    const normalized = normalizeSlackMessageInput(channel, text);
-    const payloadBody: Record<string, string> = { channel: normalized.channel, text: normalized.text };
-    if (options?.threadTs) {
-      payloadBody.thread_ts = options.threadTs;
-    }
-    const response = await this.fetchImpl("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payloadBody),
-    });
-
-    const payload = (await response.json()) as { ok?: boolean; error?: string };
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(`Slack chat.postMessage failed: ${payload.error ?? response.statusText}`);
-    }
-  }
-}
 
 export class StubGithubGhAdapter implements GithubGhAdapter {
   private nextPr = 1;

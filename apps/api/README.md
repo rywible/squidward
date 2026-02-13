@@ -12,7 +12,6 @@ Bun API server for the agent control plane. It serves both JSON APIs and the Rea
 - `API_HOST`: Bind host. Default: `0.0.0.0`
 - `API_PORT`: Bind port. Default: `3000`
 - `AGENT_DB_PATH`: Shared SQLite path used by API + worker. Default: `.data/agent.db`
-- `SLACK_SIGNING_SECRET`: Optional Slack signature secret for `/slack/events`
 - `DASHBOARD_DIST_DIR`: Optional dashboard build path override
 - `LINEAR_API_KEY`: Preferred single-user Linear personal API key. `/api/integrations/status` validates it directly via Linear GraphQL.
 - `OPENAI_API_KEY` / `OPENAI_TOKEN`: Used by `/api/integrations/status` to report OpenAI token presence
@@ -21,7 +20,12 @@ Bun API server for the agent control plane. It serves both JSON APIs and the Rea
 
 - `GET /healthz`
 - `GET /readyz`
-- `POST /slack/events`
+- `GET /api/chat/conversations?cursor=&limit=`
+- `POST /api/chat/conversations`
+- `GET /api/chat/conversations/:id`
+- `POST /api/chat/conversations/:id/messages`
+- `POST /api/chat/conversations/:id/compact`
+- `GET /api/chat/conversations/:id/runs`
 - `GET /api/dashboard/snapshot`
 - `GET /api/runs`
 - `GET /api/queue`
@@ -69,5 +73,5 @@ bun run dev
 ## Integration Notes
 
 1. Set `AGENT_DB_PATH` so API + worker share the same SQLite file.
-2. Configure direct credentials (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `LINEAR_API_KEY`, `BRAVE_API_KEY`).
-3. `/api/integrations/status` includes checks for Slack, Linear API key validity, OpenAI token presence, GitHub CLI auth (`gh auth status`), and Codex CLI availability (`codex --version` fallback `codex --help`).
+2. Configure direct credentials (`LINEAR_API_KEY`, `BRAVE_API_KEY`).
+3. `/api/integrations/status` includes checks for Linear API key validity, OpenAI token presence, GitHub CLI auth (`gh auth status`), and Codex CLI availability (`codex --version` fallback `codex --help`).

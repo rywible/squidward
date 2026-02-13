@@ -13,6 +13,8 @@
 - `TEST_GEN_MAX_CANDIDATES_PER_BUG` (optional): max generated test candidates per bug source. Default: `3`.
 - `MEMO_WEEKDAY` / `MEMO_HOUR` (optional): weekly memo schedule. Default: Monday at 09:00.
 - `GRAPH_REINDEX_CRON` (optional): graph index interval in minutes. Default: `60`.
+- `RETRIEVAL_BUDGET_TOKENS` (optional): mission retrieval budget per run. Default: `4000`.
+- `MAX_SKILLS_PER_MISSION` (optional): max OOB skills injected into each mission prompt. Default: `2` (range `1..5`).
 - `PERF_SCIENTIST_ENABLED` (optional): enable APS job pipeline (`1`/`0`). Default: `0`.
 - `PERF_SCIENTIST_REPO_PATH` (optional): managed repo path for perf scientist.
 - `PERF_SCIENTIST_BENCHMARK_ROOT` (optional): benchmark project root for `wrela perf/perfcmp`.
@@ -27,7 +29,6 @@
 - `PERF_SCIENTIST_TEST_COMMAND` (optional): required targeted test command before opening APS draft PR. Default: `cargo test -q -p compiler --lib`.
 
 Adapters:
-- `SLACK_BOT_TOKEN`: required for `RealSlackAdapter` (`chat.postMessage`).
 - `BRAVE_API_KEY`: required for `RealBraveResearchAdapter` (`/res/v1/web/search`).
 - `OPENAI_API_KEY`: required for `RealOpenAIModelAdapter` (`/v1/responses`).
 - `OPENAI_MODEL` (optional): model name for OpenAI adapter. Default: `gpt-4.1-mini`.

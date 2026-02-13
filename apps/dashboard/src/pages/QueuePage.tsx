@@ -1,6 +1,7 @@
 import { dashboardApiClient } from '../api/client';
 import { PageState } from '../components/PageState';
 import { TaskActionButtons } from '../components/TaskActionButtons';
+import { VirtualList } from '../components/VirtualList';
 import { usePollingQuery } from '../hooks/usePollingQuery';
 
 export function QueuePage() {
@@ -14,8 +15,13 @@ export function QueuePage() {
       <h2>Queue</h2>
       <PageState error={error} loading={loading} onRefresh={() => void refresh()} refreshing={refreshing} />
 
-      <div className="list-grid">
-        {(data ?? []).map((task) => (
+      <VirtualList
+        className="virtual-feed"
+        items={data ?? []}
+        maxHeight={760}
+        overscan={3}
+        rowHeight={180}
+        renderItem={(task) => (
           <article className="panel" key={task.id}>
             <div className="row-between">
               <h3>{task.title}</h3>
@@ -28,8 +34,8 @@ export function QueuePage() {
             <p className="muted">Run: {task.runId}</p>
             <TaskActionButtons entityId={task.id} entityType="task" onDone={refresh} />
           </article>
-        ))}
-      </div>
+        )}
+      />
     </section>
   );
 }

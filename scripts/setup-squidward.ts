@@ -20,10 +20,6 @@ const KEY_ORDER = [
   "PRIMARY_REPO_PATH",
   "API_HOST",
   "API_PORT",
-  "SLACK_BOT_TOKEN",
-  "SLACK_APP_TOKEN",
-  "SLACK_SOCKET_MODE_ENABLED",
-  "SLACK_SIGNING_SECRET",
   "LINEAR_API_KEY",
   "BRAVE_API_KEY",
   "OPENAI_API_KEY",
@@ -62,14 +58,11 @@ const KEY_ORDER = [
   "PERF_SCIENTIST_BASE_REF",
   "PERF_SCIENTIST_PATCH_COMMAND_TEMPLATE",
   "PERF_SCIENTIST_TEST_COMMAND",
-  "PERF_SCIENTIST_SLACK_CHANNEL",
 ] as const;
 
 const REMOVED_KEYS = [
   "OAUTH_REDIRECT_BASE",
   "OAUTH_SECRET_KEY",
-  "SLACK_CLIENT_ID",
-  "SLACK_CLIENT_SECRET",
   "LINEAR_CLIENT_ID",
   "LINEAR_CLIENT_SECRET",
 ] as const;
@@ -204,22 +197,6 @@ const main = async (): Promise<void> => {
     printSection("API");
     env.API_HOST = await prompt(rl, "API host", env.API_HOST, "0.0.0.0");
     env.API_PORT = await prompt(rl, "API port", env.API_PORT, "3000");
-
-    printSection("Slack Integration");
-    env.SLACK_BOT_TOKEN = await prompt(rl, "Slack bot token", env.SLACK_BOT_TOKEN, "");
-    env.SLACK_APP_TOKEN = await prompt(
-      rl,
-      "Slack app token (xapp-..., required for Socket Mode)",
-      env.SLACK_APP_TOKEN,
-      ""
-    );
-    env.SLACK_SOCKET_MODE_ENABLED = await prompt(
-      rl,
-      "Enable Slack Socket Mode (1=yes, 0=no)",
-      env.SLACK_SOCKET_MODE_ENABLED,
-      "1"
-    );
-    env.SLACK_SIGNING_SECRET = await prompt(rl, "Slack signing secret", env.SLACK_SIGNING_SECRET, "");
 
     printSection("Linear Integration");
     env.LINEAR_API_KEY = await prompt(rl, "Linear personal API key (preferred)", env.LINEAR_API_KEY, "");
@@ -427,13 +404,6 @@ const main = async (): Promise<void> => {
       env.PERF_SCIENTIST_TEST_COMMAND,
       "cargo test -q -p compiler --lib"
     );
-    env.PERF_SCIENTIST_SLACK_CHANNEL = await prompt(
-      rl,
-      "Optional perf scientist Slack channel",
-      env.PERF_SCIENTIST_SLACK_CHANNEL,
-      ""
-    );
-
     printSection("Writing Config");
     writeEnvFile(ENV_PATH, env);
     writeEnvFile(

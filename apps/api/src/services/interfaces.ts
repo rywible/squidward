@@ -4,6 +4,10 @@ import type {
   AuditEntry,
   BraveBudgetResponse,
   CtoMemo,
+  Conversation,
+  ConversationMessage,
+  ConversationRun,
+  ConversationState,
   CockpitSnapshot,
   EvidencePath,
   GeneratedTestCandidate,
@@ -184,6 +188,29 @@ export interface RetrievalService {
   feedback(event: RetrievalFeedbackEvent): Promise<{ ok: boolean }>;
 }
 
+export interface ChatService {
+  listConversations(cursor?: string, limit?: number): Promise<{ items: Conversation[]; nextCursor?: string }>;
+  createConversation(title?: string): Promise<Conversation>;
+  getConversation(conversationId: string): Promise<{
+    conversation: Conversation;
+    state: ConversationState | null;
+    messages: ConversationMessage[];
+  } | null>;
+  sendMessage(input: {
+    conversationId: string;
+    content: string;
+    mode?: "chat" | "mission";
+    repoPath?: string;
+  }): Promise<{
+    conversation: Conversation;
+    userMessage: ConversationMessage;
+    assistantMessage: ConversationMessage;
+    run: ConversationRun;
+  }>;
+  listRuns(conversationId: string): Promise<{ items: ConversationRun[] }>;
+  compactConversation(conversationId: string): Promise<{ ok: boolean; summaryText: string }>;
+}
+
 export interface Services {
   dashboard: DashboardService;
   runs: RunsService;
@@ -203,4 +230,5 @@ export interface Services {
   repoLearning: RepoLearningService;
   tokenEconomy: TokenEconomyService;
   retrieval: RetrievalService;
+  chat: ChatService;
 }

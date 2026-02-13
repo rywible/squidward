@@ -10,7 +10,7 @@ interface IntegrationsOptions {
 
 type SqlRecord = Record<string, unknown>;
 
-type OAuthProvider = "slack" | "linear";
+type OAuthProvider = "linear";
 
 type CommandRunner = (
   command: string,
@@ -91,7 +91,7 @@ const parseScopes = (value: string): string[] => {
 const addSeconds = (seconds: number): string => new Date(Date.now() + seconds * 1000).toISOString();
 
 const resolveProvider = (provider: string): OAuthProvider | null => {
-  if (provider === "slack" || provider === "linear") {
+  if (provider === "linear") {
     return provider;
   }
   return null;
@@ -178,7 +178,7 @@ export class IntegrationsService {
     this.runCommand = options.runCommand ?? defaultRunCommand;
 
     const encryptionSeed =
-      this.env.OAUTH_SECRET_KEY ?? this.env.AGENT_ENCRYPTION_KEY ?? this.env.AGENT_SECRET_KEY ?? "dev-oauth-key";
+      this.env.AGENT_ENCRYPTION_KEY ?? this.env.AGENT_SECRET_KEY ?? "dev-oauth-key";
     this.cipher = new SecretCipher(encryptionSeed);
 
     this.ensureTables();
@@ -212,25 +212,9 @@ export class IntegrationsService {
   private providerConfig(provider: OAuthProvider): ProviderConfig | null {
     const baseUrl =
       this.env.OAUTH_BASE_URL ??
-      this.env.OAUTH_REDIRECT_BASE ??
       this.env.API_BASE_URL ??
       this.env.PUBLIC_API_BASE_URL ??
       "";
-
-    if (provider === "slack") {
-      const clientId = this.env.SLACK_CLIENT_ID ?? "";
-      const clientSecret = this.env.SLACK_CLIENT_SECRET ?? "";
-      const redirectUri =
-        this.env.SLACK_OAUTH_REDIRECT_URI ??
-        (baseUrl ? `${baseUrl.replace(/\/$/, "")}/oauth/slack/callback` : "");
-      const scopes = parseScopes(this.env.SLACK_OAUTH_SCOPES ?? "commands chat:write");
-
-      if (!clientId || !clientSecret || !redirectUri) {
-        return null;
-      }
-
-      return { clientId, clientSecret, scopes, redirectUri };
-    }
 
     const clientId = this.env.LINEAR_CLIENT_ID ?? "";
     const clientSecret = this.env.LINEAR_CLIENT_SECRET ?? "";
@@ -305,37 +289,11 @@ export class IntegrationsService {
   }
 
   private async exchangeCode(
-    provider: OAuthProvider,
+    _provider: OAuthProvider,
     config: ProviderConfig,
     code: string,
     codeVerifier: string
   ): Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }> {
-    if (provider === "slack") {
-      const body = new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: config.redirectUri,
-        code_verifier: codeVerifier,
-      });
-
-      const response = await this.fetchImpl("https://slack.com/api/oauth.v2.access", {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        body,
-      });
-
-      const data = (await response.json()) as Record<string, unknown>;
-      if (!response.ok || data.ok !== true) {
-        return { ok: false, error: String(data.error ?? `http_${response.status}`) };
-      }
-
-      return { ok: true, data };
-    }
-
     const response = await this.fetchImpl("https://api.linear.app/oauth/token", {
       method: "POST",
       headers: {
@@ -360,34 +318,10 @@ export class IntegrationsService {
   }
 
   private async refreshToken(
-    provider: OAuthProvider,
+    _provider: OAuthProvider,
     config: ProviderConfig,
     refreshToken: string
   ): Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }> {
-    if (provider === "slack") {
-      const body = new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-      });
-
-      const response = await this.fetchImpl("https://slack.com/api/oauth.v2.access", {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        body,
-      });
-
-      const data = (await response.json()) as Record<string, unknown>;
-      if (!response.ok || data.ok !== true) {
-        return { ok: false, error: String(data.error ?? `http_${response.status}`) };
-      }
-
-      return { ok: true, data };
-    }
-
     const response = await this.fetchImpl("https://api.linear.app/oauth/token", {
       method: "POST",
       headers: {
@@ -423,54 +357,25 @@ export class IntegrationsService {
     let refreshToken = "";
     let expiresAt: string | null = null;
 
-    if (provider === "slack") {
-      const team = (tokenPayload.team as Record<string, unknown> | undefined) ?? {};
-      const authedUser = (tokenPayload.authed_user as Record<string, unknown> | undefined) ?? {};
+    accountRef =
+      (typeof tokenPayload.organization_id === "string" && tokenPayload.organization_id) ||
+      (typeof tokenPayload.team_id === "string" && tokenPayload.team_id) ||
+      currentAccountRef;
 
-      accountRef =
-        (typeof team.id === "string" && team.id) ||
-        (typeof authedUser.id === "string" && authedUser.id) ||
-        currentAccountRef;
+    if (typeof tokenPayload.scope === "string") {
+      scopes = parseScopes(tokenPayload.scope);
+    }
 
-      const scopeValue = tokenPayload.scope;
-      if (typeof scopeValue === "string") {
-        scopes = parseScopes(scopeValue);
-      }
+    if (typeof tokenPayload.access_token === "string") {
+      accessToken = tokenPayload.access_token;
+    }
 
-      if (typeof tokenPayload.access_token === "string") {
-        accessToken = tokenPayload.access_token;
-      } else if (typeof authedUser.access_token === "string") {
-        accessToken = authedUser.access_token;
-      }
+    if (typeof tokenPayload.refresh_token === "string") {
+      refreshToken = tokenPayload.refresh_token;
+    }
 
-      if (typeof tokenPayload.refresh_token === "string") {
-        refreshToken = tokenPayload.refresh_token;
-      }
-
-      if (typeof tokenPayload.expires_in === "number") {
-        expiresAt = addSeconds(tokenPayload.expires_in);
-      }
-    } else {
-      accountRef =
-        (typeof tokenPayload.organization_id === "string" && tokenPayload.organization_id) ||
-        (typeof tokenPayload.team_id === "string" && tokenPayload.team_id) ||
-        currentAccountRef;
-
-      if (typeof tokenPayload.scope === "string") {
-        scopes = parseScopes(tokenPayload.scope);
-      }
-
-      if (typeof tokenPayload.access_token === "string") {
-        accessToken = tokenPayload.access_token;
-      }
-
-      if (typeof tokenPayload.refresh_token === "string") {
-        refreshToken = tokenPayload.refresh_token;
-      }
-
-      if (typeof tokenPayload.expires_in === "number") {
-        expiresAt = addSeconds(tokenPayload.expires_in);
-      }
+    if (typeof tokenPayload.expires_in === "number") {
+      expiresAt = addSeconds(tokenPayload.expires_in);
     }
 
     this.db
@@ -544,17 +449,9 @@ export class IntegrationsService {
       code_challenge_method: "S256",
     });
 
-    if (targetProvider === "slack") {
-      params.set("scope", config.scopes.join(" "));
-    } else {
-      params.set("response_type", "code");
-      params.set("scope", config.scopes.join(" "));
-    }
-
-    const authorizeUrl =
-      targetProvider === "slack"
-        ? `https://slack.com/oauth/v2/authorize?${params.toString()}`
-        : `https://linear.app/oauth/authorize?${params.toString()}`;
+    params.set("response_type", "code");
+    params.set("scope", config.scopes.join(" "));
+    const authorizeUrl = `https://linear.app/oauth/authorize?${params.toString()}`;
 
     const response: OAuthStartResponse = {
       ok: true,
@@ -836,7 +733,6 @@ export class IntegrationsService {
       ok: true,
       generatedAt: nowIso(),
       providers: {
-        slack: this.oauthStatus("slack"),
         linear,
         openai: {
           provider: "openai",

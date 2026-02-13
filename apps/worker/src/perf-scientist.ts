@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import type { GithubGhAdapter, SlackAdapter } from "./adapters";
+import type { GithubGhAdapter } from "./adapters";
 import type { CommandAuditService } from "./audit";
 import { applyPersonaSignal } from "./persona-feedback";
 
@@ -30,7 +30,6 @@ export interface PerfScientistConfig {
   baseRefForPerfCmp: string;
   patchCommandTemplate?: string;
   testCommand: string;
-  slackChannel?: string;
 }
 
 export interface PerfScientistStatus {
@@ -214,8 +213,7 @@ export class PerfScientist {
     private readonly db: Database,
     private readonly audit: CommandAuditService,
     private readonly gh: GithubGhAdapter,
-    private readonly config: PerfScientistConfig,
-    private readonly slack?: SlackAdapter
+    private readonly config: PerfScientistConfig
   ) {}
 
   getConfig(): PerfScientistConfig {
@@ -1032,13 +1030,6 @@ export class PerfScientist {
   }
 
   private async notify(text: string): Promise<void> {
-    if (!this.slack || !this.config.slackChannel) {
-      return;
-    }
-    try {
-      await this.slack.postMessage(this.config.slackChannel, text);
-    } catch {
-      // Slack delivery is best effort and should never break APS control flow.
-    }
+    void text;
   }
 }

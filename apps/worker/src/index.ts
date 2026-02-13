@@ -6,13 +6,10 @@ import { CodexSessionManager } from "./session-manager";
 import {
   RealCodexCliAdapter,
   RealGithubGhAdapter,
-  RealSlackAdapter,
   StubCodexCliAdapter,
   StubGithubGhAdapter,
-  StubSlackAdapter,
   type CodexCliAdapter,
   type GithubGhAdapter,
-  type SlackAdapter,
 } from "./adapters";
 import { CommandAuditService } from "./audit";
 import { WorkerRuntime, type WorkerTaskPayload } from "./runtime";
@@ -21,7 +18,6 @@ import { PerfScientist } from "./perf-scientist";
 import { CodexHarness } from "./codex-harness";
 import { MemoryGovernor } from "./memory-governor";
 import { WrelaLearningService } from "./wrela-learning";
-import { SlackSocketModeListener } from "./slack-socket-mode";
 import { WorktreeManager } from "./worktree-manager";
 
 const workspaceRoot = resolve(import.meta.dir, "../../..");
@@ -40,7 +36,6 @@ const queue = new SerializedTaskProcessor<WorkerTaskPayload>(db, { coalesceWindo
 const sessions = new CodexSessionManager(Number(process.env.MAX_CODEX_SESSIONS ?? 4));
 const codexCli: CodexCliAdapter = useStubExecutor ? new StubCodexCliAdapter() : new RealCodexCliAdapter();
 const ghAdapter: GithubGhAdapter = useStubExecutor ? new StubGithubGhAdapter() : new RealGithubGhAdapter();
-const slackAdapter: SlackAdapter = useStubExecutor ? new StubSlackAdapter() : new RealSlackAdapter();
 const audit = new CommandAuditService(db, codexCli);
 const moonshot = new MoonshotEngine(db.db);
 const codexHarness = new CodexHarness(codexCli, db.db);
@@ -82,9 +77,7 @@ const perfScientist = new PerfScientist(
   baseRefForPerfCmp: process.env.PERF_SCIENTIST_BASE_REF ?? "main",
   patchCommandTemplate: process.env.PERF_SCIENTIST_PATCH_COMMAND_TEMPLATE,
   testCommand: process.env.PERF_SCIENTIST_TEST_COMMAND ?? "cargo test -q -p compiler --lib",
-  slackChannel: process.env.PERF_SCIENTIST_SLACK_CHANNEL,
   },
-  slackAdapter
 );
 
 const runtime = new WorkerRuntime({
@@ -99,7 +92,6 @@ const runtime = new WorkerRuntime({
   memoryGovernor,
   worktrees,
   wrelaLearning: wrlelaLearning,
-  slack: slackAdapter,
   config: {
     portfolioTopN: Number(process.env.PORTFOLIO_TOP_N ?? 5),
     portfolioMinEvAutorun: Number(process.env.PORTFOLIO_MIN_EV_AUTORUN ?? 1.25),
@@ -110,6 +102,7 @@ const runtime = new WorkerRuntime({
     primaryRepoPath:
       process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
     retrievalBudgetTokens: Number(process.env.RETRIEVAL_BUDGET_TOKENS ?? 4000),
+    maxSkillsPerMission: Number(process.env.MAX_SKILLS_PER_MISSION ?? 2),
     maxTasksPerHeartbeat: Number(process.env.MAX_TASKS_PER_HEARTBEAT ?? 8),
     maxCodexSessions: Number(process.env.MAX_CODEX_SESSIONS ?? 4),
     codexWorktreesEnabled: process.env.CODEX_WORKTREES_ENABLED !== "0",
@@ -120,19 +113,6 @@ const runtime = new WorkerRuntime({
     },
   },
 });
-
-const socketModeEnabled = process.env.SLACK_SOCKET_MODE_ENABLED === "1";
-const slackSocketListener =
-  socketModeEnabled && process.env.SLACK_APP_TOKEN
-    ? new SlackSocketModeListener({
-        appToken: process.env.SLACK_APP_TOKEN,
-        primaryRepoPath:
-          process.env.PRIMARY_REPO_PATH ?? resolve(process.env.HOME ?? process.cwd(), "projects/wrela"),
-        queue,
-        db: db.db,
-        onTaskQueued: () => runtime.poke(),
-      })
-    : null;
 
 const writePreflightAudit = async (
   runId: string,
@@ -205,21 +185,9 @@ await queue.enqueue({
 });
 
 await runtime.start();
-if (socketModeEnabled) {
-  if (!slackSocketListener) {
-    console.warn("[worker] SLACK_SOCKET_MODE_ENABLED=1 but SLACK_APP_TOKEN is missing; socket mode disabled");
-  } else {
-    await slackSocketListener.start();
-    console.log("[worker] Slack Socket Mode listener started");
-  }
-}
-
-console.log(
-  `[worker] started with db=${dbPath} stubExecutor=${useStubExecutor} slackSocketMode=${socketModeEnabled ? "on" : "off"}`
-);
+console.log(`[worker] started with db=${dbPath} stubExecutor=${useStubExecutor} transport=web`);
 
 process.on("SIGINT", () => {
-  slackSocketListener?.stop();
   runtime.stop();
   process.exit(0);
 });

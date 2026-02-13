@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { dashboardApiClient } from '../api/client';
 import type { TaskAction } from '../types/dashboard';
+import { Button } from './ui/button';
 
 interface TaskActionButtonsProps {
   entityId: string;
@@ -37,15 +38,17 @@ export function TaskActionButtons({ entityId, entityType, onDone }: TaskActionBu
     <div className="action-wrap">
       <div className="action-buttons">
         {actions.map((action) => (
-          <button
+          <Button
             className="btn"
             disabled={busyAction !== null}
             key={action}
             onClick={() => void onAction(action)}
             type="button"
+            variant={action === 'stop' ? 'danger' : 'secondary'}
+            size="sm"
           >
             {busyAction === action ? `${action}...` : action}
-          </button>
+          </Button>
         ))}
       </div>
       {error ? <span className="error-text">{error}</span> : null}

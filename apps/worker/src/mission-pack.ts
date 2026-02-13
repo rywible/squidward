@@ -2,6 +2,7 @@ import type { Database } from "@squidward/db";
 import { createHash } from "node:crypto";
 
 import { buildRetrievalContextPack } from "./retrieval-orchestrator";
+import { selectMissionSkills } from "./skills";
 import type { WorkerTaskPayload } from "./runtime";
 
 type SqlRecord = Record<string, unknown>;
@@ -45,6 +46,14 @@ export interface MissionPack {
       evidenceRefs: string[];
     };
     evidenceSnippets: Array<{ sourceClass: string; citation: string; text: string; score: number }>;
+    selectedSkills: Array<{
+      id: string;
+      title: string;
+      reason: string;
+      confidence: number;
+      playbook: string[];
+      successCriteria: string[];
+    }>;
     cachedSummary?: string;
   };
 }
@@ -59,6 +68,7 @@ export const buildMissionPack = (input: {
   objective: string;
   tokenEnvelope: MissionPack["tokenEnvelope"];
   retrievalBudgetTokens?: number;
+  maxSkillsPerMission?: number;
 }): MissionPack => {
   const db = input.db;
   const retrieval = db
@@ -102,6 +112,13 @@ export const buildMissionPack = (input: {
       })) ?? [];
 
   const recentEpisodes = retrieval.recentEpisodes;
+  const selectedSkills = selectMissionSkills({
+    intent: retrieval.intent,
+    taskType: input.task.taskType,
+    requestText: input.task.requestText ?? input.task.command ?? "",
+    objective: input.objective,
+    maxSkills: input.maxSkillsPerMission ?? 2,
+  });
 
   const sourceFingerprint = hash(
     JSON.stringify({
@@ -113,6 +130,7 @@ export const buildMissionPack = (input: {
       retrievalIntent: retrieval.intent,
       retrievalUsedTokens: retrieval.usedTokens,
       retrievalEvidenceRefs: retrieval.evidenceRefs,
+      skills: selectedSkills.map((skill) => `${skill.id}:${skill.confidence.toFixed(3)}`),
     })
   );
   const cacheKey = `mission:${input.repoPath}:${input.task.taskType ?? "maintenance"}:${input.objective}:${retrieval.intent}`;
@@ -140,6 +158,7 @@ export const buildMissionPack = (input: {
         retrievalTokens: retrieval.usedTokens,
         evidenceRefs: retrieval.evidenceRefs.slice(0, 20),
         personaTop: personaTraits.slice(0, 4),
+        skills: selectedSkills.map((skill) => ({ id: skill.id, confidence: skill.confidence })),
       });
       db.query(
         `INSERT INTO context_cache
@@ -189,12 +208,23 @@ export const buildMissionPack = (input: {
         evidenceRefs: retrieval.evidenceRefs,
       },
       evidenceSnippets: retrieval.snippets,
+      selectedSkills,
       cachedSummary,
     },
   };
 };
 
 export const renderMissionPrompt = (pack: MissionPack, objectiveDetails: string): string => {
+  const skillLines =
+    pack.context.selectedSkills.length === 0
+      ? ["- none"]
+      : pack.context.selectedSkills.flatMap((skill) => [
+          `- ${skill.title} (${skill.id}) confidence=${skill.confidence.toFixed(2)}`,
+          `  reason: ${skill.reason}`,
+          ...skill.playbook.map((step) => `  playbook: ${step}`),
+          ...skill.successCriteria.map((criterion) => `  success: ${criterion}`),
+        ]);
+
   return [
     "You are an autonomous coding worker operating under strict policy.",
     `Mission id: ${pack.missionId}`,
@@ -216,6 +246,9 @@ export const renderMissionPrompt = (pack: MissionPack, objectiveDetails: string)
     `- Max input tokens: ${pack.tokenEnvelope.maxInputTokens}`,
     `- Max output tokens: ${pack.tokenEnvelope.maxOutputTokens}`,
     `- Economy mode: ${pack.tokenEnvelope.economyMode ? "on" : "off"}`,
+    "",
+    "Selected OOB skills (follow these playbooks unless objective conflicts):",
+    ...skillLines,
     "",
     "Objective details:",
     objectiveDetails,

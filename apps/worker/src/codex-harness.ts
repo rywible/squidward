@@ -13,6 +13,22 @@ const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.leng
 
 const shellEscapeSingle = (value: string): string => value.replace(/'/g, `'\\''`);
 const codexCliPath = (): string => process.env.CODEX_CLI_PATH?.trim() || "codex";
+const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+const codexMissionMaxAttempts = (): number => {
+  const parsed = Number(process.env.CODEX_MISSION_MAX_ATTEMPTS ?? 3);
+  return Math.max(1, Math.min(5, Number.isFinite(parsed) ? parsed : 3));
+};
+const codexMissionRetryBaseMs = (): number => {
+  const parsed = Number(process.env.CODEX_MISSION_RETRY_BASE_MS ?? 1200);
+  return Math.max(100, Math.min(10_000, Number.isFinite(parsed) ? parsed : 1200));
+};
+const isTransientCodexFailure = (detail: string): boolean =>
+  /reconnecting|stream disconnected|connection reset|econnreset|etimedout|timed out|timeout|temporarily unavailable|network error|socket hang up|429|rate limit/i.test(
+    detail
+  );
 const buildCommandCandidates = (codexCmdQuoted: string, promptQuoted: string, promptFileQuoted: string): string[] => {
   const template = process.env.CODEX_MISSION_COMMAND_TEMPLATE?.trim();
   if (template) {
@@ -55,7 +71,7 @@ export class CodexHarness {
       writeFileSync(promptFile, prompt, "utf8");
       const promptFileQuoted = shellEscapeSingle(promptFile);
       const firstCandidates = buildCommandCandidates(codexCmd, quoted, promptFileQuoted);
-      const first = await this.runFirstSuccessful(firstCandidates, input.cwd, "first");
+      const first = await this.runWithRetries(firstCandidates, input.cwd, "first");
       const firstRaw = first.artifactRefs.length > 0 ? first.artifactRefs.join("\n") : "";
       try {
         const parsed = parseCodexPayload(firstRaw);
@@ -76,7 +92,7 @@ export class CodexHarness {
         writeFileSync(repairFile, repairFullPrompt, "utf8");
         const repairFileQuoted = shellEscapeSingle(repairFile);
         const secondCandidates = buildCommandCandidates(codexCmd, repairQuoted, repairFileQuoted);
-        const second = await this.runFirstSuccessful(secondCandidates, input.cwd, "repair");
+        const second = await this.runWithRetries(secondCandidates, input.cwd, "repair");
         const secondRaw = second.artifactRefs.length > 0 ? second.artifactRefs.join("\n") : "";
         this.recordUsage(input, prompt, secondRaw, input.missionPack.cache.hit);
         try {
@@ -109,6 +125,34 @@ export class CodexHarness {
       }
     }
     throw new Error(`codex_command_failed:${stage}:${lastFailure}`);
+  }
+
+  private async runWithRetries(
+    commands: string[],
+    cwd: string,
+    stage: "first" | "repair"
+  ): Promise<{ exitCode: number; artifactRefs: string[] }> {
+    const maxAttempts = codexMissionMaxAttempts();
+    const baseDelayMs = codexMissionRetryBaseMs();
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.runFirstSuccessful(commands, cwd, stage);
+      } catch (error) {
+        const asError = error instanceof Error ? error : new Error(String(error));
+        lastError = asError;
+        const message = asError.message;
+        const shouldRetry = attempt < maxAttempts && isTransientCodexFailure(message);
+        if (!shouldRetry) {
+          throw asError;
+        }
+        const backoffMs = Math.min(baseDelayMs * 2 ** (attempt - 1), 15_000);
+        await sleep(backoffMs);
+      }
+    }
+
+    throw lastError ?? new Error(`codex_command_failed:${stage}:unknown`);
   }
 
   private recordUsage(input: CodexHarnessRunInput, prompt: string, output: string, cacheHit: boolean): void {

@@ -4,20 +4,13 @@ import {
   RealCodexCliAdapter,
   RealGithubGhAdapter,
   RealOpenAIModelAdapter,
-  RealSlackAdapter,
   normalizeBraveSearchResults,
   normalizeOpenAiOutput,
-  normalizeSlackMessageInput,
   type ExecRunner,
   type FetchLike,
 } from "../src/adapters";
 
 describe("adapter normalization", () => {
-  it("normalizes Slack message input", () => {
-    const normalized = normalizeSlackMessageInput("  #ops  ", "  deployed  ");
-    expect(normalized).toEqual({ channel: "#ops", text: "deployed" });
-  });
-
   it("normalizes Brave search payload", () => {
     const fetchedAt = new Date("2026-02-12T10:00:00.000Z");
     const normalized = normalizeBraveSearchResults(
@@ -52,22 +45,6 @@ describe("adapter normalization", () => {
 });
 
 describe("real adapters with injected mocks", () => {
-  it("calls Slack chat.postMessage", async () => {
-    let requestUrl = "";
-    let requestBody = "";
-    const fetchImpl: FetchLike = async (input, init) => {
-      requestUrl = String(input);
-      requestBody = String(init?.body ?? "");
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    };
-
-    const adapter = new RealSlackAdapter({ token: "xoxb-test", fetchImpl });
-    await adapter.postMessage("  #eng  ", "  hello team  ");
-
-    expect(requestUrl).toBe("https://slack.com/api/chat.postMessage");
-    expect(JSON.parse(requestBody)).toEqual({ channel: "#eng", text: "hello team" });
-  });
-
   it("creates draft PR via gh", async () => {
     let argsSeen: string[] = [];
     const execRunner: ExecRunner = async (_command, args = []) => {

@@ -1,5 +1,6 @@
 import { dashboardApiClient } from '../api/client';
 import { PageState } from '../components/PageState';
+import { VirtualList } from '../components/VirtualList';
 import { usePollingQuery } from '../hooks/usePollingQuery';
 
 export function AuditPage() {
@@ -13,8 +14,13 @@ export function AuditPage() {
       <h2>Audit</h2>
       <PageState error={error} loading={loading} onRefresh={() => void refresh()} refreshing={refreshing} />
 
-      <div className="list-grid">
-        {(data ?? []).map((entry) => (
+      <VirtualList
+        className="virtual-feed"
+        items={data ?? []}
+        maxHeight={760}
+        overscan={4}
+        rowHeight={136}
+        renderItem={(entry) => (
           <article className="panel" key={entry.id}>
             <p className="muted">Run: {entry.runId}</p>
             <p>
@@ -26,8 +32,8 @@ export function AuditPage() {
               <strong>{entry.exitCode !== undefined && entry.exitCode !== null ? entry.exitCode : 'running'}</strong>
             </p>
           </article>
-        ))}
-      </div>
+        )}
+      />
     </section>
   );
 }

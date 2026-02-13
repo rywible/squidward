@@ -89,11 +89,20 @@ export class SerializedTaskProcessor<T = unknown> {
     return next as QueueItem<T>;
   }
 
+  async claimNextForTaskTypes(preferredTaskTypes: string[]): Promise<QueueItem<T> | null> {
+    const next = await this.pickNextReadyTask(preferredTaskTypes);
+    if (!next) {
+      return null;
+    }
+    await this.db.updateQueueItemStatus(next.id, "running", this.now());
+    return next as QueueItem<T>;
+  }
+
   async finalize(taskId: string, success: boolean): Promise<void> {
     await this.db.updateQueueItemStatus(taskId, success ? "done" : "failed", this.now());
   }
 
-  private async pickNextReadyTask(): Promise<QueueItem | null> {
+  private async pickNextReadyTask(preferredTaskTypes?: string[]): Promise<QueueItem | null> {
     const ready = await this.db.listReadyQueueItems(100, this.now());
     if (ready.length === 0) {
       return null;
@@ -106,6 +115,16 @@ export class SerializedTaskProcessor<T = unknown> {
       }
       return a.createdAt.getTime() - b.createdAt.getTime();
     });
+
+    if (preferredTaskTypes && preferredTaskTypes.length > 0) {
+      const preferred = ready.find((task) => {
+        const payload = task.payload as { taskType?: string } | null;
+        return !!payload?.taskType && preferredTaskTypes.includes(payload.taskType);
+      });
+      if (preferred) {
+        return preferred;
+      }
+    }
 
     return ready[0] ?? null;
   }

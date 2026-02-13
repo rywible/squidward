@@ -2,6 +2,10 @@ import type {
   ActionResult,
   AuditEntry,
   CtoMemo,
+  Conversation,
+  ConversationMessage,
+  ConversationRun,
+  ConversationState,
   EvidencePath,
   GraphImpactReport,
   PerfArtifact,
@@ -74,6 +78,14 @@ export class DashboardApiClient {
 
   async taskAction(taskId: string, action: TaskAction): Promise<ActionResult> {
     return this.post<ActionResult, RunActionRequest>(`/dashboard/tasks/${taskId}/actions`, { action });
+  }
+
+  async pauseWorker(): Promise<ActionResult> {
+    return this.post<ActionResult, Record<string, never>>('/actions/pause', {});
+  }
+
+  async resumeWorker(): Promise<ActionResult> {
+    return this.post<ActionResult, Record<string, never>>('/actions/resume', {});
   }
 
   async getPortfolioTop(limit = 5): Promise<PortfolioCandidate[]> {
@@ -258,6 +270,66 @@ export class DashboardApiClient {
     notes?: string;
   }): Promise<{ ok: boolean }> {
     return this.post<{ ok: boolean }, typeof payload>('/retrieval/feedback', payload);
+  }
+
+  async getConversations(cursor?: string, limit = 30): Promise<{ items: Conversation[]; nextCursor?: string }> {
+    const search = new URLSearchParams();
+    search.set('limit', String(limit));
+    if (cursor) search.set('cursor', cursor);
+    return this.get<{ items: Conversation[]; nextCursor?: string }>(`/chat/conversations?${search.toString()}`);
+  }
+
+  async createConversation(title?: string): Promise<Conversation> {
+    return this.post<Conversation, { title?: string }>('/chat/conversations', { title });
+  }
+
+  async getConversation(conversationId: string): Promise<{
+    conversation: Conversation;
+    state: ConversationState | null;
+    messages: ConversationMessage[];
+  }> {
+    return this.get<{
+      conversation: Conversation;
+      state: ConversationState | null;
+      messages: ConversationMessage[];
+    }>(`/chat/conversations/${encodeURIComponent(conversationId)}`);
+  }
+
+  async sendConversationMessage(input: {
+    conversationId: string;
+    content: string;
+    mode?: 'chat' | 'mission';
+    repoPath?: string;
+  }): Promise<{
+    conversation: Conversation;
+    userMessage: ConversationMessage;
+    assistantMessage: ConversationMessage;
+    run: ConversationRun;
+  }> {
+    return this.post<
+      {
+        conversation: Conversation;
+        userMessage: ConversationMessage;
+        assistantMessage: ConversationMessage;
+        run: ConversationRun;
+      },
+      { content: string; mode?: 'chat' | 'mission'; repoPath?: string }
+    >(`/chat/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
+      content: input.content,
+      mode: input.mode,
+      repoPath: input.repoPath,
+    });
+  }
+
+  async compactConversation(conversationId: string): Promise<{ ok: boolean; summaryText: string }> {
+    return this.post<{ ok: boolean; summaryText: string }, Record<string, never>>(
+      `/chat/conversations/${encodeURIComponent(conversationId)}/compact`,
+      {},
+    );
+  }
+
+  async getConversationRuns(conversationId: string): Promise<{ items: ConversationRun[] }> {
+    return this.get<{ items: ConversationRun[] }>(`/chat/conversations/${encodeURIComponent(conversationId)}/runs`);
   }
 
   private async get<T>(path: string, signal?: AbortSignal): Promise<T> {

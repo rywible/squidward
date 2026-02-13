@@ -356,7 +356,7 @@ CREATE TABLE IF NOT EXISTS cto_memos (
   week_end TEXT NOT NULL,
   summary_md TEXT NOT NULL,
   evidence_links TEXT NOT NULL DEFAULT '[]',
-  delivered_to_slack INTEGER NOT NULL DEFAULT 0 CHECK (delivered_to_slack IN (0, 1)),
+  delivered_to_ui INTEGER NOT NULL DEFAULT 0 CHECK (delivered_to_ui IN (0, 1)),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -776,6 +776,74 @@ CREATE TABLE IF NOT EXISTS context_cache (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_context_cache_key
 ON context_cache(cache_key);
+
+-- Web chat conversations (web-only cut).
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  pinned_facts_json TEXT NOT NULL DEFAULT '[]',
+  last_message_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_last_message_at
+ON conversations(last_message_at DESC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'chat',
+  status TEXT NOT NULL DEFAULT 'done',
+  content TEXT NOT NULL,
+  run_id TEXT,
+  retrieval_query_id TEXT,
+  evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+  token_input INTEGER NOT NULL DEFAULT 0,
+  token_output INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_created
+ON conversation_messages(conversation_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_run_id
+ON conversation_messages(run_id);
+
+CREATE TABLE IF NOT EXISTS conversation_state (
+  conversation_id TEXT PRIMARY KEY,
+  summary_text TEXT NOT NULL DEFAULT '',
+  summary_turn_count INTEGER NOT NULL DEFAULT 0,
+  compacted_at TEXT,
+  last_intent TEXT,
+  token_budget INTEGER NOT NULL DEFAULT 4000,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  user_message_id TEXT NOT NULL,
+  assistant_message_id TEXT,
+  run_id TEXT NOT NULL,
+  lane TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  error_text TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+  FOREIGN KEY (user_message_id) REFERENCES conversation_messages(id),
+  FOREIGN KEY (assistant_message_id) REFERENCES conversation_messages(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_runs_conversation_created
+ON conversation_runs(conversation_id, created_at DESC);
 
 -- Memory Retrieval v3.
 CREATE TABLE IF NOT EXISTS retrieval_documents (

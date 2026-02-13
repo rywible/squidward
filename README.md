@@ -5,7 +5,7 @@ Bun + TypeScript implementation of the personal engineering/ops manager agent de
 ## What is implemented
 
 - Shared domain packages (`packages/core`, `packages/db`, `packages/security`)
-- API control plane (`apps/api`) with dashboard APIs + OAuth + integration status/refresh endpoints
+- API control plane (`apps/api`) with dashboard APIs + integration status endpoint
 - Worker runtime (`apps/worker`) with:
 1. single active Codex session manager
 2. serialized priority queue (P0/P1/P2)
@@ -77,6 +77,4 @@ Then open [http://localhost:3000](http://localhost:3000).
 - `apps/worker` defaults to real command execution. Set `WORKER_USE_STUB_EXECUTOR=1` for dry/local simulation.
 - API and worker must point to the same `AGENT_DB_PATH`.
 - Integrations are live:
-1. OAuth for Slack/Linear (`/oauth/:provider/start` + `/oauth/:provider/callback`)
-2. Integration status endpoint (`/api/integrations/status`)
-3. Provider refresh endpoint (`/api/integrations/refresh/:provider`)
+1. Integration status endpoint (`/api/integrations/status`)

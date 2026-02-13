@@ -1,3 +1,7 @@
+import { Button } from './ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { Skeleton } from './ui/skeleton';
+
 interface PageStateProps {
   loading: boolean;
   error: string | null;
@@ -7,26 +11,42 @@ interface PageStateProps {
 
 export function PageState({ loading, error, refreshing, onRefresh }: PageStateProps) {
   if (loading) {
-    return <div className="panel">Loading...</div>;
+    return (
+      <Card className="panel">
+        <CardHeader>
+          <CardTitle>Loading data</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="muted">Pulling latest telemetry from Squidward services.</p>
+          <Skeleton className="skeleton-line" />
+          <Skeleton className="skeleton-line" />
+        </CardContent>
+      </Card>
+    );
   }
 
   if (error) {
     return (
-      <div className="panel error-panel">
-        <p>Failed to load data: {error}</p>
-        <button className="btn" onClick={onRefresh} type="button">
-          Try again
-        </button>
-      </div>
+      <Card className="panel error-panel">
+        <CardHeader>
+          <CardTitle>Failed to load dashboard data</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p>{error}</p>
+          <Button className="mt-3" onClick={onRefresh} type="button">
+            Try again
+          </Button>
+        </CardContent>
+      </Card>
     );
   }
 
   return (
     <div className="state-row">
-      {refreshing ? <span className="muted">Refreshing...</span> : <span className="muted">Updated live</span>}
-      <button className="btn ghost" onClick={onRefresh} type="button">
+      <span className="muted">{refreshing ? 'Refreshing...' : 'Updated live'}</span>
+      <Button onClick={onRefresh} type="button" variant="ghost" size="sm">
         Refresh now
-      </button>
+      </Button>
     </div>
   );
 }
