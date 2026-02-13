@@ -25,6 +25,15 @@ const fetchFocusPayload = async (signal: AbortSignal): Promise<FocusPayload> => 
   return { cockpit, runs, queue, portfolio };
 };
 
+const formatRunStatus = (status: RunSummary['status']): string => {
+  if (status === 'running') return 'In progress';
+  if (status === 'queued') return 'Queued';
+  if (status === 'failed') return 'Failed';
+  if (status === 'completed') return 'Completed';
+  if (status === 'paused') return 'Paused';
+  return 'Stopped';
+};
+
 export function FocusPage() {
   const NowIcon = appIcons.now;
   const RiskIcon = appIcons.risk;
@@ -73,25 +82,26 @@ export function FocusPage() {
   }
 
   return (
-    <section className="minimal-grid minimal-grid--three">
+    <section className="minimal-grid minimal-grid--three focus-page">
       <PageState loading={loading} error={error} refreshing={refreshing} onRefresh={refresh} />
 
       <Card>
         <CardHeader>
           <CardTitle className="card-title-with-icon">
             <NowIcon className="icon icon-18" aria-hidden="true" />
-            <span>Now</span>
+            <span>What Is Happening Now</span>
           </CardTitle>
+          <p className="muted">Live work currently running and urgent queue pressure.</p>
         </CardHeader>
         <CardContent>
-          <p className="muted">{nowCard?.modeSummary}</p>
-          <p className="metric-row">Queued critical: {nowCard?.queuedCriticalCount ?? 0}</p>
+          <p className="metric-row">Worker mode: {nowCard?.modeSummary}</p>
+          <p className="metric-row">Urgent items waiting: {nowCard?.queuedCriticalCount ?? 0}</p>
           <div className="simple-list">
-            {(nowCard?.activeRuns ?? []).length === 0 ? <p className="muted">No active runs.</p> : null}
+            {(nowCard?.activeRuns ?? []).length === 0 ? <p className="muted">No active jobs right now.</p> : null}
             {(nowCard?.activeRuns ?? []).map((run) => (
               <div key={run.id} className="simple-list-item">
                 <span>{run.objective}</span>
-                <span className="muted">{run.status}</span>
+                <span className="muted">{formatRunStatus(run.status)}</span>
               </div>
             ))}
           </div>
@@ -102,11 +112,12 @@ export function FocusPage() {
         <CardHeader>
           <CardTitle className="card-title-with-icon">
             <RiskIcon className="icon icon-18" aria-hidden="true" />
-            <span>Risk</span>
+            <span>Needs Your Attention</span>
           </CardTitle>
+          <p className="muted">Failures and blockers that can stall progress.</p>
         </CardHeader>
         <CardContent>
-          <p className="metric-row">Needs decision: {riskCard?.needsDecisionCount ?? 0}</p>
+          <p className="metric-row">Open issues needing triage: {riskCard?.needsDecisionCount ?? 0}</p>
           <div className="simple-list">
             {(riskCard?.failedLast24h ?? []).slice(0, 3).map((run) => (
               <div key={run.id} className="simple-list-item">
@@ -126,7 +137,7 @@ export function FocusPage() {
                 </span>
               </div>
             ))}
-            {(riskCard?.needsDecisionCount ?? 0) === 0 ? <p className="muted">No immediate risks.</p> : null}
+            {(riskCard?.needsDecisionCount ?? 0) === 0 ? <p className="muted">No blockers or failures at the moment.</p> : null}
           </div>
         </CardContent>
       </Card>
@@ -135,17 +146,18 @@ export function FocusPage() {
         <CardHeader>
           <CardTitle className="card-title-with-icon">
             <NextIcon className="icon icon-18" aria-hidden="true" />
-            <span>Next</span>
+            <span>Recommended Next Moves</span>
           </CardTitle>
+          <p className="muted">Highest expected-value opportunities to run next.</p>
         </CardHeader>
         <CardContent>
           <div className="simple-list">
-            {(nextCard?.items ?? []).length === 0 ? <p className="muted">No priority opportunities.</p> : null}
+            {(nextCard?.items ?? []).length === 0 ? <p className="muted">No ranked opportunities available yet.</p> : null}
             {(nextCard?.items ?? []).map((item) => (
               <div key={item.id} className="next-item">
                 <div>
                   <p>{item.title}</p>
-                  <p className="muted">EV {item.ev.toFixed(2)} · Risk {item.riskClass}</p>
+                  <p className="muted">Expected value: {item.ev.toFixed(2)} · Risk: {item.riskClass}</p>
                 </div>
                 <div className="next-actions">
                   <Button

@@ -367,9 +367,8 @@ export function ChatPage() {
             {messages.map((message) => (
               <article key={message.id} className={`chat-message chat-message--${message.role}`}>
                 <header className="chat-message-meta">
-                  <span>{message.role === 'assistant' ? 'Sq' : 'You'}</span>
-                  {message.status !== 'done' ? <span>{message.status}</span> : null}
-                  {message.evidenceRefs.length > 0 ? <span>{message.evidenceRefs.length} refs</span> : null}
+                  <span>{message.role === 'assistant' ? 'Squidward' : 'You'}</span>
+                  {message.status === 'running' ? <span>Thinking</span> : null}
                 </header>
                 <p>{message.content || (message.role === 'assistant' ? 'Thinking...' : '')}</p>
               </article>

@@ -26,6 +26,28 @@ const formatRelative = (iso: string): string => {
   return `${deltaDay}d ago`;
 };
 
+const formatTriggerType = (trigger: string): string => {
+  const normalized = trigger.trim().toLowerCase();
+  if (normalized === 'manual') return 'Manual';
+  if (normalized === 'chat_reply') return 'Chat';
+  if (normalized === 'codex_mission') return 'Mission';
+  if (normalized === 'scheduled') return 'Scheduled';
+  return normalized
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(' ');
+};
+
+const formatRunStatus = (status: RunSummary['status']): string => {
+  if (status === 'completed') return 'Completed';
+  if (status === 'failed') return 'Failed';
+  if (status === 'running') return 'In progress';
+  if (status === 'queued') return 'Queued';
+  if (status === 'paused') return 'Paused';
+  return 'Stopped';
+};
+
 export function HistoryPage() {
   const HistoryIcon = appIcons.history;
   const DoneIcon = appIcons.done;
@@ -62,8 +84,9 @@ export function HistoryPage() {
         <CardHeader className="history-head">
           <CardTitle className="card-title-with-icon">
             <HistoryIcon className="icon icon-18" aria-hidden="true" />
-            <span>History</span>
+            <span>Recent Activity</span>
           </CardTitle>
+          <p className="muted">Completed and failed runs with outcomes you can review.</p>
           <div className="history-filters" role="tablist" aria-label="History filters">
             {(['all', 'failed', 'completed'] as const).map((option) => (
               <button
@@ -72,14 +95,14 @@ export function HistoryPage() {
                 className={`history-filter${filter === option ? ' active' : ''}`}
                 onClick={() => setFilter(option)}
               >
-                {option}
+                {option === 'all' ? 'All' : option === 'failed' ? 'Failed' : 'Completed'}
               </button>
             ))}
           </div>
         </CardHeader>
         <CardContent>
           <div className="history-list">
-            {filtered.length === 0 ? <p className="muted">No runs for this filter.</p> : null}
+            {filtered.length === 0 ? <p className="muted">No runs match this filter.</p> : null}
             {filtered.slice(0, 80).map((run: RunSummary) => (
               <button
                 key={run.id}
@@ -93,7 +116,7 @@ export function HistoryPage() {
                     <span>{run.objective}</span>
                   </span>
                   <span className="history-item-end">
-                    <span className={`status-chip status-chip--${run.status}`}>{run.status}</span>
+                    <span className={`status-chip status-chip--${run.status}`}>{formatRunStatus(run.status)}</span>
                     {expandedRunId === run.id ? (
                       <ExpandOpenIcon className="icon icon-14 history-expand-open" aria-hidden="true" />
                     ) : (
@@ -103,11 +126,12 @@ export function HistoryPage() {
                 </div>
                 <div className="history-row-sub">
                   <span>{formatRelative(run.updatedAt)}</span>
-                  <span>{run.triggerType}</span>
+                  <span>{formatTriggerType(run.triggerType)}</span>
                   {typeof run.durationMs === 'number' ? <span>{Math.round(run.durationMs / 1000)}s</span> : null}
                 </div>
                 {expandedRunId === run.id ? (
                   <div className="history-row-detail">
+                    <p className="muted">Status: {formatRunStatus(run.status)}</p>
                     <p className="muted">{formatTime(run.updatedAt)}</p>
                     <p className="muted">Run ID: {run.id}</p>
                   </div>

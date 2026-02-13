@@ -721,6 +721,17 @@ code {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.focus-page .ui-card__header {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.focus-page .ui-card__content {
+  display: grid;
+  gap: 0.55rem;
+  align-content: start;
+}
+
 .metric-row {
   margin-top: 0.35rem;
   margin-bottom: 0.35rem;
@@ -791,6 +802,11 @@ code {
   justify-content: space-between;
   align-items: center;
   gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.history-head .ui-card__title + .muted {
+  width: 100%;
 }
 
 .history-filters {
@@ -806,6 +822,10 @@ code {
   padding: 0.25rem 0.5rem;
   font-size: 0.76rem;
   cursor: pointer;
+}
+
+.history-row .status-chip {
+  text-transform: none;
 }
 
 .history-filter.active {
