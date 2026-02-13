@@ -20,9 +20,9 @@ const DEFAULT_CONFIG: SchedulerConfig = {
 };
 
 const INTERVALS_MS: Record<SchedulerMode, number> = {
-  active: 3 * 60_000,
-  idle: 15 * 60_000,
-  "off-hours": 45 * 60_000,
+  active: 5_000,
+  idle: 30_000,
+  "off-hours": 2 * 60_000,
 };
 
 export function isOffHours(now: Date, rawConfig?: Partial<SchedulerConfig>): boolean {

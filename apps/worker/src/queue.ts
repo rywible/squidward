@@ -89,8 +89,8 @@ export class SerializedTaskProcessor<T = unknown> {
     return next as QueueItem<T>;
   }
 
-  async claimNextForTaskTypes(preferredTaskTypes: string[]): Promise<QueueItem<T> | null> {
-    const next = await this.pickNextReadyTask(preferredTaskTypes);
+  async claimNextForTaskTypes(preferredTaskTypes: string[], strictPreferred = false): Promise<QueueItem<T> | null> {
+    const next = await this.pickNextReadyTask(preferredTaskTypes, strictPreferred);
     if (!next) {
       return null;
     }
@@ -102,7 +102,7 @@ export class SerializedTaskProcessor<T = unknown> {
     await this.db.updateQueueItemStatus(taskId, success ? "done" : "failed", this.now());
   }
 
-  private async pickNextReadyTask(preferredTaskTypes?: string[]): Promise<QueueItem | null> {
+  private async pickNextReadyTask(preferredTaskTypes?: string[], strictPreferred = false): Promise<QueueItem | null> {
     const ready = await this.db.listReadyQueueItems(100, this.now());
     if (ready.length === 0) {
       return null;
@@ -123,6 +123,9 @@ export class SerializedTaskProcessor<T = unknown> {
       });
       if (preferred) {
         return preferred;
+      }
+      if (strictPreferred) {
+        return null;
       }
     }
 

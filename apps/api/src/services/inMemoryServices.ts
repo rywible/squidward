@@ -143,6 +143,32 @@ const toAlertState = (consumed: number, cap: number): BraveBudgetResponse["alert
   return "normal";
 };
 
+const isSqliteLockedError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("database is locked") || message.includes("sqlite_busy");
+};
+
+const waitMs = async (ms: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+const withDbWriteRetry = async <T>(operation: () => T, retries = 6): Promise<T> => {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!isSqliteLockedError(error) || attempt >= retries) {
+        throw error;
+      }
+      const backoffMs = Math.min(750, 30 * 2 ** attempt);
+      attempt += 1;
+      await waitMs(backoffMs);
+    }
+  }
+};
+
 const migrate = (db: Database): void => {
   const migrationPath = resolve(import.meta.dir, "../../../../packages/db/migrations/001_initial.sql");
   db.exec(readFileSync(migrationPath, "utf8"));
@@ -570,17 +596,19 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
       async listTop(limit: number): Promise<PortfolioCandidate[]> {
         const rows = db
           .query(
-            `SELECT pc.id, pc.source_type, pc.source_ref, pc.title, pc.summary, pc.risk_class, pc.effort_class, pc.evidence_links,
-                    ps.impact, ps.confidence, ps.urgency, ps.risk, ps.effort, ps.ev, ps.scored_at
-             FROM portfolio_candidates pc
-             JOIN portfolio_scores ps ON ps.candidate_id = pc.id
-             WHERE ps.id IN (
-               SELECT id
-               FROM portfolio_scores latest
-               WHERE latest.candidate_id = pc.id
-               ORDER BY latest.scored_at DESC
-               LIMIT 1
+            `WITH latest_scores AS (
+               SELECT candidate_id, MAX(scored_at) AS scored_at
+               FROM portfolio_scores
+               GROUP BY candidate_id
              )
+             SELECT pc.id, pc.source_type, pc.source_ref, pc.title, pc.summary, pc.risk_class, pc.effort_class, pc.evidence_links,
+                    ps.impact, ps.confidence, ps.urgency, ps.risk, ps.effort, ps.ev, ps.scored_at
+             FROM latest_scores ls
+             JOIN portfolio_scores ps
+               ON ps.candidate_id = ls.candidate_id
+              AND ps.scored_at = ls.scored_at
+             JOIN portfolio_candidates pc
+               ON pc.id = ls.candidate_id
              ORDER BY ps.ev DESC, ps.scored_at DESC
              LIMIT ?`
           )
@@ -1920,16 +1948,20 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
         const now = nowIso();
         const id = crypto.randomUUID();
         const normalizedTitle = (title ?? "").trim() || "New conversation";
-        db.query(
-          `INSERT INTO conversations
-           (id, title, status, pinned_facts_json, created_at, updated_at)
-           VALUES (?, ?, 'active', '[]', ?, ?)`
-        ).run(id, normalizedTitle.slice(0, 120), now, now);
-        db.query(
-          `INSERT OR REPLACE INTO conversation_state
-           (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
-           VALUES (?, '', 0, NULL, NULL, 4000, ?)`
-        ).run(id, now);
+        await withDbWriteRetry(() =>
+          db.query(
+            `INSERT INTO conversations
+             (id, title, status, pinned_facts_json, created_at, updated_at)
+             VALUES (?, ?, 'active', '[]', ?, ?)`
+          ).run(id, normalizedTitle.slice(0, 120), now, now)
+        );
+        await withDbWriteRetry(() =>
+          db.query(
+            `INSERT OR REPLACE INTO conversation_state
+             (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
+             VALUES (?, '', 0, NULL, NULL, 4000, ?)`
+          ).run(id, now)
+        );
         const row = db
           .query(
             `SELECT id, title, status, last_message_at, created_at, updated_at
@@ -2014,57 +2046,70 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
         const userMessageId = crypto.randomUUID();
         const assistantMessageId = crypto.randomUUID();
         const runRowId = crypto.randomUUID();
-        db.query(
-          `INSERT INTO conversation_messages
-           (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
-           VALUES (?, ?, 'user', ?, 'done', ?, ?, '[]', ?, ?)`
-        ).run(userMessageId, input.conversationId, lane, normalized, runId, now, now);
-        db.query(
-          `INSERT INTO conversation_messages
-           (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
-           VALUES (?, ?, 'assistant', ?, 'queued', '', ?, '[]', ?, ?)`
-        ).run(assistantMessageId, input.conversationId, lane, runId, now, now);
-        db.query(
-          `INSERT INTO conversation_runs
-           (id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`
-        ).run(runRowId, input.conversationId, userMessageId, assistantMessageId, runId, lane, now, now);
-        db.query(
-          `UPDATE conversations
-           SET last_message_at=?, updated_at=?
-           WHERE id=?`
-        ).run(now, now, input.conversationId);
-        db.query(
-          `INSERT INTO task_queue
-           (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, 'queued', ?, ?, ?)`
-        ).run(
-          crypto.randomUUID(),
-          runId,
-          lane === "chat" ? "chat_reply" : "codex_mission",
-          JSON.stringify({
-            dedupeKey: `web:${input.conversationId}:${userMessageId}`,
-            payload: {
-              taskType: lane === "chat" ? "chat_reply" : "codex_mission",
+        await withDbWriteRetry(() => {
+          db.exec("BEGIN IMMEDIATE TRANSACTION");
+          try {
+            db.query(
+              `INSERT INTO conversation_messages
+               (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
+               VALUES (?, ?, 'user', ?, 'done', ?, ?, '[]', ?, ?)`
+            ).run(userMessageId, input.conversationId, lane, normalized, runId, now, now);
+            db.query(
+              `INSERT INTO conversation_messages
+               (id, conversation_id, role, mode, status, content, run_id, evidence_refs_json, created_at, updated_at)
+               VALUES (?, ?, 'assistant', ?, 'queued', '', ?, '[]', ?, ?)`
+            ).run(assistantMessageId, input.conversationId, lane, runId, now, now);
+            db.query(
+              `INSERT INTO conversation_runs
+               (id, conversation_id, user_message_id, assistant_message_id, run_id, lane, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`
+            ).run(runRowId, input.conversationId, userMessageId, assistantMessageId, runId, lane, now, now);
+            db.query(
+              `UPDATE conversations
+               SET last_message_at=?, updated_at=?
+               WHERE id=?`
+            ).run(now, now, input.conversationId);
+            db.query(
+              `INSERT INTO task_queue
+               (id, source_id, task_type, payload_json, priority, status, scheduled_for, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 0, 'queued', ?, ?, ?)`
+            ).run(
+              crypto.randomUUID(),
               runId,
-              domain: lane === "chat" ? "chat" : "general",
-              objective: lane === "chat" ? "Respond to web chat message" : "Execute heavy mission requested via web chat",
-              title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
-              requestText: normalized,
-              repoPath: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? "",
-              cwd: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? process.cwd(),
-              conversationId: input.conversationId,
-              userMessageId,
-              assistantMessageId,
-              responseMode: lane,
-            },
-            coalescedCount: 0,
-            title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
-          }),
-          now,
-          now,
-          now
-        );
+              lane === "chat" ? "chat_reply" : "codex_mission",
+              JSON.stringify({
+                dedupeKey: `web:${input.conversationId}:${userMessageId}`,
+                payload: {
+                  taskType: lane === "chat" ? "chat_reply" : "codex_mission",
+                  runId,
+                  domain: lane === "chat" ? "chat" : "general",
+                  objective: lane === "chat" ? "Respond to web chat message" : "Execute heavy mission requested via web chat",
+                  title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
+                  requestText: normalized,
+                  repoPath: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? "",
+                  cwd: input.repoPath ?? process.env.PRIMARY_REPO_PATH ?? process.cwd(),
+                  conversationId: input.conversationId,
+                  userMessageId,
+                  assistantMessageId,
+                  responseMode: lane,
+                },
+                coalescedCount: 0,
+                title: lane === "chat" ? "Web chat reply" : "Web heavy mission",
+              }),
+              now,
+              now,
+              now
+            );
+            db.exec("COMMIT");
+          } catch (error) {
+            try {
+              db.exec("ROLLBACK");
+            } catch {
+              // no-op
+            }
+            throw error;
+          }
+        });
         const conversation = mapConversation(
           db
             .query(`SELECT id, title, status, last_message_at, created_at, updated_at FROM conversations WHERE id=?`)
@@ -2122,17 +2167,19 @@ export const createInMemoryServices = (options?: ServiceOptions): Services => {
         const messages = rows.map(mapConversationMessage);
         const compacted = compactConversationMessages(messages, 8);
         const now = nowIso();
-        db.query(
-          `INSERT INTO conversation_state
-           (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
-           VALUES (?, ?, ?, ?, NULL, 4000, ?)
-           ON CONFLICT(conversation_id) DO UPDATE SET
-             summary_text=excluded.summary_text,
-             summary_turn_count=excluded.summary_turn_count,
-             compacted_at=excluded.compacted_at,
-             token_budget=excluded.token_budget,
-             updated_at=excluded.updated_at`
-        ).run(conversationId, compacted.summary, compacted.turns, now, now);
+        await withDbWriteRetry(() =>
+          db.query(
+            `INSERT INTO conversation_state
+             (conversation_id, summary_text, summary_turn_count, compacted_at, last_intent, token_budget, updated_at)
+             VALUES (?, ?, ?, ?, NULL, 4000, ?)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+               summary_text=excluded.summary_text,
+               summary_turn_count=excluded.summary_turn_count,
+               compacted_at=excluded.compacted_at,
+               token_budget=excluded.token_budget,
+               updated_at=excluded.updated_at`
+          ).run(conversationId, compacted.summary, compacted.turns, now, now)
+        );
         return { ok: true, summaryText: compacted.summary };
       },
     },

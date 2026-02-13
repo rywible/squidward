@@ -190,14 +190,9 @@ export class WorkerRuntime {
         try {
           const availableSlots = Math.max(0, Math.min(this.config.maxTasksPerHeartbeat, this.sessions.getAvailableSlots()));
           const work: Array<Promise<void>> = [];
-          for (let i = 0; i < availableSlots; i += 1) {
-            // Reserve the first slot for interactive user work when present.
-            const claimed =
-              i === 0
-                ? await this.queue.claimNextForTaskTypes(["chat_reply", "codex_mission"])
-                : await this.queue.claimNext();
+          const startClaimed = (claimed: Awaited<ReturnType<typeof this.queue.claimNext>>) => {
             if (!claimed) {
-              break;
+              return;
             }
             const session = this.sessions.start(claimed.id);
             const payload =
@@ -224,6 +219,21 @@ export class WorkerRuntime {
                 }
               })()
             );
+          };
+
+          if (availableSlots > 0) {
+            // Reserve one lane strictly for user chat replies.
+            const interactive = await this.queue.claimNextForTaskTypes(["chat_reply"], true);
+            startClaimed(interactive);
+          }
+
+          const backgroundSlots = Math.max(0, availableSlots - 1);
+          for (let i = 0; i < backgroundSlots; i += 1) {
+            const claimed = await this.queue.claimNext();
+            if (!claimed) {
+              break;
+            }
+            startClaimed(claimed);
           }
           if (work.length > 0) {
             await Promise.allSettled(work);
@@ -296,7 +306,10 @@ export class WorkerRuntime {
     try {
       this.sqliteDb
         .query(
-          `DELETE FROM task_queue
+          `UPDATE task_queue
+           SET status='failed',
+               last_error='trimmed_overflow',
+               updated_at=?
            WHERE status='queued'
              AND task_type = ?
              AND id NOT IN (
@@ -307,7 +320,7 @@ export class WorkerRuntime {
                LIMIT ?
              )`
         )
-        .run(taskType, taskType, keep);
+        .run(this.now().toISOString(), taskType, taskType, keep);
     } catch (error) {
       console.error(`[worker] failed to trim queued tasks for ${taskType}:`, error);
     }

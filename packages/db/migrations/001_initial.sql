@@ -291,6 +291,9 @@ CREATE TABLE IF NOT EXISTS portfolio_scores (
 CREATE INDEX IF NOT EXISTS idx_portfolio_scores_scored_at
 ON portfolio_scores(scored_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_portfolio_scores_candidate_scored
+ON portfolio_scores(candidate_id, scored_at DESC);
+
 CREATE TABLE IF NOT EXISTS portfolio_decisions (
   id TEXT PRIMARY KEY,
   score_id TEXT NOT NULL,
