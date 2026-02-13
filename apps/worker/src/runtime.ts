@@ -235,8 +235,10 @@ export class WorkerRuntime {
             }
             startClaimed(claimed);
           }
+          // Keep heartbeats responsive: do not block on long-running background tasks.
+          // Each task closure handles its own success/failure/finalize lifecycle.
           if (work.length > 0) {
-            await Promise.allSettled(work);
+            void Promise.allSettled(work);
           }
         } catch (error) {
           console.error("[worker] task execution failed:", error);
