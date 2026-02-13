@@ -14,6 +14,28 @@ import { buildTokenEnvelope } from "./token-economy";
 import { recordReward } from "./reward-engine";
 import { WorktreeManager } from "./worktree-manager";
 
+const sanitizeChatReplyOutput = (summary: string): string => {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return "I’m here. What do you want to work on?";
+  }
+  const scaffoldPrefix = /^(prepared|drafted)\b/i;
+  if (!scaffoldPrefix.test(trimmed)) {
+    return trimmed;
+  }
+
+  const quoted = trimmed.match(/["']([^"']{2,280})["']/);
+  if (quoted?.[1]) {
+    return quoted[1].trim();
+  }
+
+  const cleaned = trimmed
+    .replace(/^(prepared|drafted)\b[^:]*:\s*/i, "")
+    .replace(/\s+\|\s+wait.*$/i, "")
+    .trim();
+  return cleaned.length > 0 ? cleaned : "I’m here. What do you want to work on?";
+};
+
 export type WorkerTaskType =
   | "maintenance"
   | "chat_reply"
@@ -492,7 +514,12 @@ export class WorkerRuntime {
           if (task.conversationId) {
             const assistantMessageId = task.assistantMessageId ?? crypto.randomUUID();
             const tokenInput = missionPack.context.retrieval.usedTokens;
-            const normalizedSummary = parsed.payload.summary.trim().length > 0 ? parsed.payload.summary.trim() : "I could not generate a response.";
+            const normalizedSummary =
+              lane === "chat"
+                ? sanitizeChatReplyOutput(parsed.payload.summary)
+                : parsed.payload.summary.trim().length > 0
+                  ? parsed.payload.summary.trim()
+                  : "I could not generate a response.";
             const tokenOutput = Math.max(1, Math.ceil(normalizedSummary.length / 4));
             this.sqliteDb
               .query(
